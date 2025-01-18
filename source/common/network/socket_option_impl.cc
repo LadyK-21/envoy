@@ -21,6 +21,11 @@ bool SocketOptionImpl::setOption(Socket& socket,
       return false;
     }
 
+    if (socket_type_.has_value() && *socket_type_ != socket.socketType()) {
+      ENVOY_LOG(info, "Skipping inapplicable socket option {}", optname_.name());
+      return true;
+    }
+
     const Api::SysCallIntResult result =
         SocketOptionImpl::setSocketOption(socket, optname_, value_.data(), value_.size());
     if (result.return_value_ != 0) {
@@ -55,6 +60,8 @@ SocketOptionImpl::getOptionDetails(const Socket&,
 }
 
 bool SocketOptionImpl::isSupported() const { return optname_.hasValue(); }
+
+absl::optional<Socket::Type> SocketOptionImpl::socketType() const { return socket_type_; }
 
 Api::SysCallIntResult SocketOptionImpl::setSocketOption(Socket& socket,
                                                         const Network::SocketOptionName& optname,

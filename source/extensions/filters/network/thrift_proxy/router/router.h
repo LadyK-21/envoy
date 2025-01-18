@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "envoy/buffer/buffer.h"
+#include "envoy/common/optref.h"
 #include "envoy/local_info/local_info.h"
 #include "envoy/rds/config.h"
 #include "envoy/router/router.h"
@@ -128,9 +129,10 @@ class RouterStats {
 public:
   RouterStats(const std::string& stat_prefix, Stats::Scope& scope,
               const LocalInfo::LocalInfo& local_info)
-      : named_(RouterNamedStats::generateStats(stat_prefix, scope)),
-        stat_name_set_(scope.symbolTable().makeSet("thrift_proxy")),
-        symbol_table_(scope.symbolTable()),
+      : stats_scope_(scope.createScope("")),
+        named_(RouterNamedStats::generateStats(stat_prefix, *stats_scope_)),
+        stat_name_set_(stats_scope_->symbolTable().makeSet("thrift_proxy")),
+        symbol_table_(stats_scope_->symbolTable()),
         upstream_rq_call_(stat_name_set_->add("thrift.upstream_rq_call")),
         upstream_rq_oneway_(stat_name_set_->add("thrift.upstream_rq_oneway")),
         upstream_rq_invalid_type_(stat_name_set_->add("thrift.upstream_rq_invalid_type")),
@@ -139,6 +141,14 @@ public:
         upstream_resp_reply_error_(stat_name_set_->add("thrift.upstream_resp_error")),
         upstream_resp_exception_(stat_name_set_->add("thrift.upstream_resp_exception")),
         upstream_resp_exception_local_(stat_name_set_->add("thrift.upstream_resp_exception_local")),
+        upstream_resp_exception_local_overflow_(
+            stat_name_set_->add("thrift.upstream_resp_exception_local.overflow")),
+        upstream_resp_exception_local_local_connection_failure_(
+            stat_name_set_->add("thrift.upstream_resp_exception_local.local_connection_failure")),
+        upstream_resp_exception_local_remote_connection_failure_(
+            stat_name_set_->add("thrift.upstream_resp_exception_local.remote_connection_failure")),
+        upstream_resp_exception_local_timeout_(
+            stat_name_set_->add("thrift.upstream_resp_exception_local.timeout")),
         upstream_resp_exception_remote_(
             stat_name_set_->add("thrift.upstream_resp_exception_remote")),
         upstream_resp_invalid_type_(stat_name_set_->add("thrift.upstream_resp_invalid_type")),
@@ -147,7 +157,11 @@ public:
         upstream_rq_size_(stat_name_set_->add("thrift.upstream_rq_size")),
         upstream_resp_size_(stat_name_set_->add("thrift.upstream_resp_size")),
         zone_(stat_name_set_->add("zone")), local_zone_name_(local_info.zoneStatName()),
-        upstream_cx_drain_close_(stat_name_set_->add("thrift.upstream_cx_drain_close")) {}
+        upstream_cx_drain_close_(stat_name_set_->add("thrift.upstream_cx_drain_close")),
+        downstream_cx_partial_response_close_(
+            stat_name_set_->add("thrift.downstream_cx_partial_response_close")),
+        downstream_cx_underflow_response_close_(
+            stat_name_set_->add("thrift.downstream_cx_underflow_response_close")) {}
 
   /**
    * Increment counter for request calls.
@@ -179,6 +193,22 @@ public:
    */
   void incCloseDrain(const Upstream::ClusterInfo& cluster) const {
     incClusterScopeCounter(cluster, nullptr, upstream_cx_drain_close_);
+  }
+
+  /**
+   * Increment counter for downstream connections that were closed due to partial responses.
+   * @param cluster Upstream::ClusterInfo& describing the upstream cluster
+   */
+  void incClosePartialResponse(const Upstream::ClusterInfo& cluster) const {
+    incClusterScopeCounter(cluster, nullptr, downstream_cx_partial_response_close_);
+  }
+
+  /**
+   * Increment counter for downstream connections that were closed due to underflow responses.
+   * @param cluster Upstream::ClusterInfo& describing the upstream cluster
+   */
+  void incCloseUnderflowResponse(const Upstream::ClusterInfo& cluster) const {
+    incClusterScopeCounter(cluster, nullptr, downstream_cx_underflow_response_close_);
   }
 
   /**
@@ -228,9 +258,30 @@ public:
    * upstream.
    * @param cluster Upstream::ClusterInfo& describing the upstream cluster
    */
-  void incResponseLocalException(const Upstream::ClusterInfo& cluster) const {
+  void incResponseLocalException(
+      const Upstream::ClusterInfo& cluster,
+      absl::optional<ConnectionPool::PoolFailureReason> reason = absl::nullopt) const {
     incClusterScopeCounter(cluster, nullptr, upstream_resp_exception_);
     incClusterScopeCounter(cluster, nullptr, upstream_resp_exception_local_);
+
+    if (reason.has_value()) {
+      switch (reason.value()) {
+      case ConnectionPool::PoolFailureReason::Overflow:
+        incClusterScopeCounter(cluster, nullptr, upstream_resp_exception_local_overflow_);
+        break;
+      case ConnectionPool::PoolFailureReason::LocalConnectionFailure:
+        incClusterScopeCounter(cluster, nullptr,
+                               upstream_resp_exception_local_local_connection_failure_);
+        break;
+      case ConnectionPool::PoolFailureReason::RemoteConnectionFailure:
+        incClusterScopeCounter(cluster, nullptr,
+                               upstream_resp_exception_local_remote_connection_failure_);
+        break;
+      case ConnectionPool::PoolFailureReason::Timeout:
+        incClusterScopeCounter(cluster, nullptr, upstream_resp_exception_local_timeout_);
+        break;
+      }
+    }
   }
 
   /**
@@ -290,7 +341,7 @@ public:
                                 Stats::Histogram::Unit::Milliseconds, value);
   }
 
-  const RouterNamedStats named_;
+  const RouterNamedStats& routerStats() const { return named_; }
 
 private:
   void incClusterScopeCounter(const Upstream::ClusterInfo& cluster,
@@ -335,6 +386,8 @@ private:
     return symbol_table_.join({zone_, local_zone_name_, upstream_zone_name, stat_name});
   }
 
+  Stats::ScopeSharedPtr stats_scope_;
+  const RouterNamedStats named_;
   Stats::StatNameSetPtr stat_name_set_;
   Stats::SymbolTable& symbol_table_;
   const Stats::StatName upstream_rq_call_;
@@ -345,6 +398,10 @@ private:
   const Stats::StatName upstream_resp_reply_error_;
   const Stats::StatName upstream_resp_exception_;
   const Stats::StatName upstream_resp_exception_local_;
+  const Stats::StatName upstream_resp_exception_local_overflow_;
+  const Stats::StatName upstream_resp_exception_local_local_connection_failure_;
+  const Stats::StatName upstream_resp_exception_local_remote_connection_failure_;
+  const Stats::StatName upstream_resp_exception_local_timeout_;
   const Stats::StatName upstream_resp_exception_remote_;
   const Stats::StatName upstream_resp_invalid_type_;
   const Stats::StatName upstream_resp_decoding_error_;
@@ -354,6 +411,8 @@ private:
   const Stats::StatName zone_;
   const Stats::StatName local_zone_name_;
   const Stats::StatName upstream_cx_drain_close_;
+  const Stats::StatName downstream_cx_partial_response_close_;
+  const Stats::StatName downstream_cx_underflow_response_close_;
 };
 
 /**
@@ -450,7 +509,7 @@ protected:
     Upstream::ThreadLocalCluster* cluster = clusterManager().getThreadLocalCluster(cluster_name);
     if (!cluster) {
       ENVOY_LOG(debug, "unknown cluster '{}'", cluster_name);
-      stats().named_.unknown_cluster_.inc();
+      stats().routerStats().unknown_cluster_.inc();
       return {AppException(AppExceptionType::InternalError,
                            fmt::format("unknown cluster '{}'", cluster_name)),
               absl::nullopt};
@@ -474,7 +533,7 @@ protected:
     }
 
     if (cluster_->maintenanceMode()) {
-      stats().named_.upstream_rq_maintenance_mode_.inc();
+      stats().routerStats().upstream_rq_maintenance_mode_.inc();
       if (metadata->messageType() == MessageType::Call) {
         stats().incResponseLocalException(*cluster_);
       }
@@ -495,7 +554,7 @@ protected:
 
     auto conn_pool_data = cluster->tcpConnPool(Upstream::ResourcePriority::Default, lb_context);
     if (!conn_pool_data) {
-      stats().named_.no_healthy_upstream_.inc();
+      stats().routerStats().no_healthy_upstream_.inc();
       if (metadata->messageType() == MessageType::Call) {
         stats().incResponseLocalException(*cluster_);
       }
@@ -581,9 +640,10 @@ public:
   /**
    * Starts the shadow request by requesting an upstream connection.
    */
-  virtual absl::optional<std::reference_wrapper<ShadowRouterHandle>>
-  submit(const std::string& cluster_name, MessageMetadataSharedPtr metadata,
-         TransportType original_transport, ProtocolType original_protocol) PURE;
+  virtual OptRef<ShadowRouterHandle> submit(const std::string& cluster_name,
+                                            MessageMetadataSharedPtr metadata,
+                                            TransportType original_transport,
+                                            ProtocolType original_protocol) PURE;
 };
 
 } // namespace Router

@@ -21,15 +21,21 @@
 #include "source/common/network/utility.h"
 #include "source/common/quic/quic_stat_names.h"
 #include "source/common/upstream/upstream_impl.h"
+#include "source/extensions/http/header_validators/envoy_default/http1_header_validator.h"
+#include "source/extensions/http/header_validators/envoy_default/http2_header_validator.h"
 
 #ifdef ENVOY_ENABLE_QUIC
 #include "source/common/quic/client_connection_factory_impl.h"
-#include "source/common/quic/quic_transport_socket_factory.h"
+#include "source/common/quic/quic_client_transport_socket_factory.h"
+#include "quiche/quic/core/deterministic_connection_id_generator.h"
 #endif
 
+#ifdef ENVOY_ENABLE_YAML
 #include "test/common/upstream/utility.h"
 #include "test/integration/ssl_utility.h"
+#endif
 #include "test/mocks/common.h"
+#include "test/mocks/server/instance.h"
 #include "test/mocks/server/transport_socket_factory_context.h"
 #include "test/mocks/stats/mocks.h"
 #include "test/mocks/upstream/cluster_info.h"
@@ -41,6 +47,14 @@
 #include "absl/strings/match.h"
 
 namespace Envoy {
+
+using ::envoy::extensions::http::header_validators::envoy_default::v3::HeaderValidatorConfig;
+using ::Envoy::Extensions::Http::HeaderValidators::EnvoyDefault::ClientHttp1HeaderValidator;
+using ::Envoy::Extensions::Http::HeaderValidators::EnvoyDefault::ClientHttp2HeaderValidator;
+using ::Envoy::Extensions::Http::HeaderValidators::EnvoyDefault::ConfigOverrides;
+using ::Envoy::Extensions::Http::HeaderValidators::EnvoyDefault::ServerHttp1HeaderValidator;
+using ::Envoy::Extensions::Http::HeaderValidators::EnvoyDefault::ServerHttp2HeaderValidator;
+
 namespace {
 
 RawConnectionDriver::DoWriteCallback writeBufferCallback(Buffer::Instance& data) {
@@ -128,23 +142,33 @@ private:
 Network::UpstreamTransportSocketFactoryPtr
 IntegrationUtil::createQuicUpstreamTransportSocketFactory(Api::Api& api, Stats::Store& store,
                                                           Ssl::ContextManager& context_manager,
-                                                          const std::string& san_to_match) {
+                                                          ThreadLocal::Instance& threadlocal,
+                                                          const std::string& san_to_match,
+                                                          bool connect_to_upstreams) {
   NiceMock<Server::Configuration::MockTransportSocketFactoryContext> context;
-  ON_CALL(context, api()).WillByDefault(testing::ReturnRef(api));
-  ON_CALL(context, scope()).WillByDefault(testing::ReturnRef(store));
+  ON_CALL(context.server_context_, api()).WillByDefault(testing::ReturnRef(api));
+  ON_CALL(context, statsScope()).WillByDefault(testing::ReturnRef(*store.rootScope()));
   ON_CALL(context, sslContextManager()).WillByDefault(testing::ReturnRef(context_manager));
+  ON_CALL(context.server_context_, threadLocal()).WillByDefault(testing::ReturnRef(threadlocal));
   envoy::extensions::transport_sockets::quic::v3::QuicUpstreamTransport
       quic_transport_socket_config;
   auto* tls_context = quic_transport_socket_config.mutable_upstream_tls_context();
+#ifdef ENVOY_ENABLE_YAML
   initializeUpstreamTlsContextConfig(
       Ssl::ClientSslTransportOptions().setAlpn(true).setSan(san_to_match).setSni("lyft.com"),
-      *tls_context);
+      *tls_context, connect_to_upstreams);
+#else
+  UNREFERENCED_PARAMETER(tls_context);
+  UNREFERENCED_PARAMETER(san_to_match);
+  UNREFERENCED_PARAMETER(connect_to_upstreams);
+  RELEASE_ASSERT(0, "unsupported");
+#endif // ENVOY_ENABLE_YAML
 
   envoy::config::core::v3::TransportSocket message;
   message.mutable_typed_config()->PackFrom(quic_transport_socket_config);
   auto& config_factory = Config::Utility::getAndCheckFactory<
       Server::Configuration::UpstreamTransportSocketConfigFactory>(message);
-  return config_factory.createTransportSocketFactory(quic_transport_socket_config, context);
+  return config_factory.createTransportSocketFactory(quic_transport_socket_config, context).value();
 }
 
 BufferingStreamDecoderPtr
@@ -193,26 +217,34 @@ IntegrationUtil::makeSingleRequest(const Network::Address::InstanceConstSharedPt
                 Filesystem::fileSystemForTest(), random_generator, bootstrap);
   Event::DispatcherPtr dispatcher(api.allocateDispatcher("test_thread"));
   TestConnectionCallbacks connection_callbacks(*dispatcher);
+  Network::TransportSocketOptionsConstSharedPtr options;
 
   std::shared_ptr<Upstream::MockClusterInfo> cluster{new NiceMock<Upstream::MockClusterInfo>()};
-  Upstream::HostDescriptionConstSharedPtr host_description{Upstream::makeTestHostDescription(
-      cluster, fmt::format("{}://127.0.0.1:80", (type == Http::CodecType::HTTP3 ? "udp" : "tcp")),
-      time_system)};
+  Upstream::HostDescriptionConstSharedPtr host_description =
+      std::shared_ptr<Upstream::HostDescriptionImpl>(*Upstream::HostDescriptionImpl::create(
+          cluster, "",
+          *Network::Utility::resolveUrl(
+              fmt::format("{}://127.0.0.1:80", (type == Http::CodecType::HTTP3 ? "udp" : "tcp"))),
+          nullptr, nullptr, envoy::config::core::v3::Locality().default_instance(),
+          envoy::config::endpoint::v3::Endpoint::HealthCheckConfig::default_instance(), 0,
+          time_system));
 
   if (type <= Http::CodecType::HTTP2) {
-    Http::CodecClientProd client(
-        type,
-        dispatcher->createClientConnection(addr, Network::Address::InstanceConstSharedPtr(),
-                                           Network::Test::createRawBufferSocket(), nullptr),
-        host_description, *dispatcher, random);
+    Http::CodecClientProd client(type,
+                                 dispatcher->createClientConnection(
+                                     addr, Network::Address::InstanceConstSharedPtr(),
+                                     Network::Test::createRawBufferSocket(), nullptr, nullptr),
+                                 host_description, *dispatcher, random, options);
     return sendRequestAndWaitForResponse(*dispatcher, method, url, body, host, content_type,
                                          client);
   }
 
 #ifdef ENVOY_ENABLE_QUIC
-  Extensions::TransportSockets::Tls::ContextManagerImpl manager(time_system);
+  testing::NiceMock<ThreadLocal::MockInstance> threadlocal;
+  NiceMock<Server::Configuration::MockServerFactoryContext> server_factory_context;
+  Extensions::TransportSockets::Tls::ContextManagerImpl manager(server_factory_context);
   Network::UpstreamTransportSocketFactoryPtr transport_socket_factory =
-      createQuicUpstreamTransportSocketFactory(api, mock_stats_store, manager,
+      createQuicUpstreamTransportSocketFactory(api, mock_stats_store, manager, threadlocal,
                                                "spiffe://lyft.com/backend-team");
   auto& quic_transport_socket_factory =
       dynamic_cast<Quic::QuicClientTransportSocketFactory&>(*transport_socket_factory);
@@ -225,13 +257,17 @@ IntegrationUtil::makeSingleRequest(const Network::Address::InstanceConstSharedPt
     // Docker only works with loopback v6 address.
     local_address = std::make_shared<Network::Address::Ipv6Instance>("::1");
   }
+  quic::DeterministicConnectionIdGenerator generator(quic::kQuicDefaultConnectionIdLength);
   Network::ClientConnectionPtr connection = Quic::createQuicNetworkConnection(
       *persistent_info, quic_transport_socket_factory.getCryptoConfig(),
-      quic::QuicServerId(quic_transport_socket_factory.clientContextConfig().serverNameIndication(),
-                         static_cast<uint16_t>(addr->ip()->port())),
-      *dispatcher, addr, local_address, quic_stat_names, {}, mock_stats_store, nullptr, nullptr);
+      quic::QuicServerId(
+          quic_transport_socket_factory.clientContextConfig()->serverNameIndication(),
+          static_cast<uint16_t>(addr->ip()->port())),
+      *dispatcher, addr, local_address, quic_stat_names, {}, *mock_stats_store.rootScope(), nullptr,
+      nullptr, generator, quic_transport_socket_factory);
   connection->addConnectionCallbacks(connection_callbacks);
-  Http::CodecClientProd client(type, std::move(connection), host_description, *dispatcher, random);
+  Http::CodecClientProd client(type, std::move(connection), host_description, *dispatcher, random,
+                               options);
   // Quic connection needs to finish handshake.
   dispatcher->run(Event::Dispatcher::RunType::Block);
   return sendRequestAndWaitForResponse(*dispatcher, method, url, body, host, content_type, client);
@@ -246,7 +282,7 @@ IntegrationUtil::makeSingleRequest(uint32_t port, const std::string& method, con
                                    const std::string& body, Http::CodecType type,
                                    Network::Address::IpVersion ip_version, const std::string& host,
                                    const std::string& content_type) {
-  auto addr = Network::Utility::resolveUrl(
+  auto addr = *Network::Utility::resolveUrl(
       fmt::format("tcp://{}:{}", Network::Test::getLoopbackAddressUrlString(ip_version), port));
   return makeSingleRequest(addr, method, url, body, type, host, content_type);
 }
@@ -281,9 +317,9 @@ RawConnectionDriver::RawConnectionDriver(uint32_t port, DoWriteCallback write_re
   }
 
   client_ = dispatcher_.createClientConnection(
-      Network::Utility::resolveUrl(
+      *Network::Utility::resolveUrl(
           fmt::format("tcp://{}:{}", Network::Test::getLoopbackAddressUrlString(version), port)),
-      Network::Address::InstanceConstSharedPtr(), std::move(transport_socket), nullptr);
+      Network::Address::InstanceConstSharedPtr(), std::move(transport_socket), nullptr, nullptr);
   // ConnectionCallbacks will call write_request_callback from the connect and low-watermark
   // callbacks. Set a small buffer limit so high-watermark is triggered after every write and
   // low-watermark is triggered every time the buffer is drained.
@@ -298,15 +334,74 @@ RawConnectionDriver::RawConnectionDriver(uint32_t port, DoWriteCallback write_re
   client_->connect();
 }
 
+// This factory is needed to avoid dealing with the ServerFactoryContext, which is
+// problematic in dedicated threads for fake upstreams or test client.
+// UHV is needed in fake upstreams or test client for translation
+// of extended CONNECT to upgrade, which is done by the codecs.
+class FakeHeaderValidatorFactory : public Http::HeaderValidatorFactory {
+public:
+  FakeHeaderValidatorFactory(const HeaderValidatorConfig& config) : config_(config) {}
+
+  Http::ServerHeaderValidatorPtr
+  createServerHeaderValidator(Http::Protocol protocol, Http::HeaderValidatorStats& stats) override {
+    ConfigOverrides config_overrides;
+
+    switch (protocol) {
+    case Http::Protocol::Http3:
+    case Http::Protocol::Http2:
+      return std::make_unique<ServerHttp2HeaderValidator>(config_, protocol, stats,
+                                                          config_overrides);
+    case Http::Protocol::Http11:
+    case Http::Protocol::Http10:
+      return std::make_unique<ServerHttp1HeaderValidator>(config_, protocol, stats,
+                                                          config_overrides);
+    }
+    PANIC_DUE_TO_CORRUPT_ENUM;
+  }
+
+  Http::ClientHeaderValidatorPtr
+  createClientHeaderValidator(Http::Protocol protocol, Http::HeaderValidatorStats& stats) override {
+    ConfigOverrides config_overrides;
+
+    switch (protocol) {
+    case Http::Protocol::Http3:
+    case Http::Protocol::Http2:
+      return std::make_unique<ClientHttp2HeaderValidator>(config_, protocol, stats,
+                                                          config_overrides);
+    case Http::Protocol::Http11:
+    case Http::Protocol::Http10:
+      return std::make_unique<ClientHttp1HeaderValidator>(config_, protocol, stats,
+                                                          config_overrides);
+    }
+    PANIC_DUE_TO_CORRUPT_ENUM;
+  }
+
+private:
+  const HeaderValidatorConfig config_;
+};
+
+Http::HeaderValidatorFactoryPtr
+IntegrationUtil::makeHeaderValidationFactory([[maybe_unused]] const HeaderValidatorConfig& config) {
+#ifdef ENVOY_ENABLE_UHV
+  return std::make_unique<FakeHeaderValidatorFactory>(config);
+#else
+  return nullptr;
+#endif
+}
+
 RawConnectionDriver::~RawConnectionDriver() = default;
 
-void RawConnectionDriver::waitForConnection() {
+testing::AssertionResult RawConnectionDriver::waitForConnection() {
   // TODO(mattklein123): Add a timeout and switch to events and waitFor().
   while (!callbacks_->connected() && !callbacks_->closed()) {
     Event::GlobalTimeSystem().timeSystem().realSleepDoNotUseWithoutScrutiny(
         std::chrono::milliseconds(10));
     dispatcher_.run(Event::Dispatcher::RunType::NonBlock);
   }
+  if (!callbacks_->connected()) {
+    return testing::AssertionFailure();
+  }
+  return testing::AssertionSuccess();
 }
 
 testing::AssertionResult RawConnectionDriver::run(Event::Dispatcher::RunType run_type,

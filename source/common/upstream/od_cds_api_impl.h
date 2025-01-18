@@ -28,31 +28,6 @@ enum class StartStatus {
 };
 
 /**
- * An interface for on-demand CDS. Defined to allow mocking.
- */
-class OdCdsApi {
-public:
-  virtual ~OdCdsApi() = default;
-
-  // Subscribe to a cluster with a given name. It's meant to eventually send a discovery request
-  // with the cluster name to the management server.
-  virtual void updateOnDemand(std::string cluster_name) PURE;
-};
-
-using OdCdsApiSharedPtr = std::shared_ptr<OdCdsApi>;
-
-/**
- * An interface used by OdCdsApiImpl for sending notifications about the missing cluster that was
- * requested.
- */
-class MissingClusterNotifier {
-public:
-  virtual ~MissingClusterNotifier() = default;
-
-  virtual void notifyMissingCluster(absl::string_view name) PURE;
-};
-
-/**
  * ODCDS API implementation that fetches via Subscription.
  */
 class OdCdsApiImpl : public OdCdsApi,
@@ -70,11 +45,11 @@ public:
 
 private:
   // Config::SubscriptionCallbacks
-  void onConfigUpdate(const std::vector<Config::DecodedResourceRef>& resources,
-                      const std::string& version_info) override;
-  void onConfigUpdate(const std::vector<Config::DecodedResourceRef>& added_resources,
-                      const Protobuf::RepeatedPtrField<std::string>& removed_resources,
-                      const std::string& system_version_info) override;
+  absl::Status onConfigUpdate(const std::vector<Config::DecodedResourceRef>& resources,
+                              const std::string& version_info) override;
+  absl::Status onConfigUpdate(const std::vector<Config::DecodedResourceRef>& added_resources,
+                              const Protobuf::RepeatedPtrField<std::string>& removed_resources,
+                              const std::string& system_version_info) override;
   void onConfigUpdateFailed(Envoy::Config::ConfigUpdateFailureReason reason,
                             const EnvoyException* e) override;
 
@@ -88,7 +63,7 @@ private:
   ClusterManager& cm_;
   MissingClusterNotifier& notifier_;
   Stats::ScopeSharedPtr scope_;
-  StartStatus status_;
+  StartStatus status_{StartStatus::NotStarted};
   absl::flat_hash_set<std::string> awaiting_names_;
   Config::SubscriptionPtr subscription_;
 };

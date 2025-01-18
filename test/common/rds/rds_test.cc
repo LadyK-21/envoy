@@ -2,8 +2,8 @@
 #include <memory>
 #include <string>
 
-#include "envoy/admin/v3/config_dump.pb.h"
-#include "envoy/admin/v3/config_dump.pb.validate.h"
+#include "envoy/admin/v3/config_dump_shared.pb.h"
+#include "envoy/admin/v3/config_dump_shared.pb.validate.h"
 #include "envoy/config/route/v3/route.pb.h"
 #include "envoy/config/route/v3/route.pb.validate.h"
 #include "envoy/extensions/filters/network/thrift_proxy/v3/route.pb.validate.h"
@@ -35,7 +35,7 @@ namespace {
 class RdsTestBase : public testing::Test {
 public:
   RdsTestBase() {
-    ON_CALL(server_factory_context_, scope()).WillByDefault(ReturnRef(scope_));
+    ON_CALL(server_factory_context_, scope()).WillByDefault(ReturnRef(*scope_.rootScope()));
     ON_CALL(server_factory_context_, messageValidationContext())
         .WillByDefault(ReturnRef(validation_context_));
   }
@@ -175,8 +175,9 @@ virtual_hosts: null
     auto response =
         TestUtility::parseYaml<envoy::service::discovery::v3::DiscoveryResponse>(response_json);
     const auto decoded_resources = TestUtility::decodeResources<RouteConfiguration>(response);
-    server_factory_context_.cluster_manager_.subscription_factory_.callbacks_->onConfigUpdate(
-        decoded_resources.refvec_, response.version_info());
+    THROW_IF_NOT_OK(
+        server_factory_context_.cluster_manager_.subscription_factory_.callbacks_->onConfigUpdate(
+            decoded_resources.refvec_, response.version_info()));
   }
 
   NiceMock<Init::MockManager> outer_init_manager_;

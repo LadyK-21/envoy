@@ -93,14 +93,14 @@ TEST_F(OnDemandFilterTest, TestDecodeHeadersWhenRouteIsNotAvailableAndOdCdsIsEna
   setupWithCds();
   Http::TestRequestHeaderMapImpl headers;
   EXPECT_CALL(decoder_callbacks_, route()).WillRepeatedly(Return(nullptr));
-  EXPECT_CALL(decoder_callbacks_, requestRouteConfigUpdate(_));
+  EXPECT_CALL(decoder_callbacks_.downstream_callbacks_, requestRouteConfigUpdate(_));
   EXPECT_EQ(Http::FilterHeadersStatus::StopIteration, filter_->decodeHeaders(headers, true));
 }
 
 TEST_F(OnDemandFilterTest, TestDecodeHeadersWhenRouteIsNotAvailable) {
   Http::TestRequestHeaderMapImpl headers;
   EXPECT_CALL(decoder_callbacks_, route()).WillRepeatedly(Return(nullptr));
-  EXPECT_CALL(decoder_callbacks_, requestRouteConfigUpdate(_));
+  EXPECT_CALL(decoder_callbacks_.downstream_callbacks_, requestRouteConfigUpdate(_));
   EXPECT_EQ(Http::FilterHeadersStatus::StopIteration, filter_->decodeHeaders(headers, true));
 }
 
@@ -155,14 +155,14 @@ TEST_F(OnDemandFilterTest, OnRouteConfigUpdateCompletionRestartsActiveStream) {
 
 // tests onClusterDiscoveryCompletion when a cluster is missing
 TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterNotFound) {
-  EXPECT_CALL(decoder_callbacks_, clearRouteCache()).Times(0);
+  EXPECT_CALL(decoder_callbacks_.downstream_callbacks_, clearRouteCache()).Times(0);
   EXPECT_CALL(decoder_callbacks_, continueDecoding());
   filter_->onClusterDiscoveryCompletion(Upstream::ClusterDiscoveryStatus::Missing);
 }
 
 // tests onClusterDiscoveryCompletion when discovering a cluster timed out
 TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterTimedOut) {
-  EXPECT_CALL(decoder_callbacks_, clearRouteCache()).Times(0);
+  EXPECT_CALL(decoder_callbacks_.downstream_callbacks_, clearRouteCache()).Times(0);
   EXPECT_CALL(decoder_callbacks_, continueDecoding());
   filter_->onClusterDiscoveryCompletion(Upstream::ClusterDiscoveryStatus::Timeout);
 }
@@ -170,7 +170,7 @@ TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterTimedOut) {
 // tests onClusterDiscoveryCompletion when a cluster is available
 TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterFound) {
   EXPECT_CALL(decoder_callbacks_, continueDecoding()).Times(0);
-  EXPECT_CALL(decoder_callbacks_, clearRouteCache());
+  EXPECT_CALL(decoder_callbacks_.downstream_callbacks_, clearRouteCache());
   EXPECT_CALL(decoder_callbacks_, decodingBuffer()).WillOnce(Return(nullptr));
   EXPECT_CALL(decoder_callbacks_, recreateStream(_)).WillOnce(Return(true));
   filter_->onClusterDiscoveryCompletion(Upstream::ClusterDiscoveryStatus::Available);
@@ -179,7 +179,7 @@ TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterFound) {
 // tests onClusterDiscoveryCompletion when a cluster is available, but recreating a stream failed
 TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterFoundRecreateStreamFailed) {
   EXPECT_CALL(decoder_callbacks_, continueDecoding());
-  EXPECT_CALL(decoder_callbacks_, clearRouteCache()).Times(0);
+  EXPECT_CALL(decoder_callbacks_.downstream_callbacks_, clearRouteCache()).Times(0);
   EXPECT_CALL(decoder_callbacks_, decodingBuffer()).WillOnce(Return(nullptr));
   EXPECT_CALL(decoder_callbacks_, recreateStream(_)).WillOnce(Return(false));
   filter_->onClusterDiscoveryCompletion(Upstream::ClusterDiscoveryStatus::Available);
@@ -189,9 +189,24 @@ TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterFoundRecreateStrea
 TEST_F(OnDemandFilterTest, OnClusterDiscoveryCompletionClusterFoundRedirectWithBody) {
   Buffer::OwnedImpl buffer;
   EXPECT_CALL(decoder_callbacks_, continueDecoding());
-  EXPECT_CALL(decoder_callbacks_, clearRouteCache()).Times(0);
+  EXPECT_CALL(decoder_callbacks_.downstream_callbacks_, clearRouteCache()).Times(0);
   EXPECT_CALL(decoder_callbacks_, decodingBuffer()).WillOnce(Return(&buffer));
   filter_->onClusterDiscoveryCompletion(Upstream::ClusterDiscoveryStatus::Available);
+}
+
+TEST(OnDemandConfigTest, Basic) {
+  NiceMock<Upstream::MockClusterManager> cm;
+  ProtobufMessage::StrictValidationVisitorImpl visitor;
+  envoy::extensions::filters::http::on_demand::v3::OnDemand config;
+
+  OnDemandFilterConfig config1(config, cm, visitor);
+
+  config.mutable_odcds();
+  OnDemandFilterConfig config2(config, cm, visitor);
+
+  config.mutable_odcds()->set_resources_locator("foo");
+  EXPECT_THROW_WITH_MESSAGE({ OnDemandFilterConfig config3(config, cm, visitor); }, EnvoyException,
+                            "foo does not have a xdstp:, http: or file: scheme");
 }
 
 } // namespace OnDemand

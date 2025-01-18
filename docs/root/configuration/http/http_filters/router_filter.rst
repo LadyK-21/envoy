@@ -8,8 +8,8 @@ that Envoy is deployed for. The filter's main job is to follow the instructions 
 configured :ref:`route table <envoy_v3_api_msg_config.route.v3.RouteConfiguration>`. In addition to forwarding and
 redirection, the filter also handles retry, statistics, etc.
 
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.router.v3.Router``.
 * :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.router.v3.Router>`
-* This filter should be configured with the name *envoy.filters.http.router*.
 
 .. _config_http_filters_router_headers_consumed:
 
@@ -88,6 +88,10 @@ gateway-error
 
 reset
   Envoy will attempt a retry if the upstream server does not respond at all (disconnect/reset/read timeout.)
+
+reset-before-request
+  Equivalent to *reset* but will only retry requests that have not been sent to the upstream server
+  (i.e. the headers have not been sent).
 
 connect-failure
   Envoy will attempt a retry if a request is failed because of a connection failure to the upstream
@@ -342,6 +346,15 @@ request was sent, incrementing by one for each retry. Only set if the
 :ref:`include_attempt_count_in_response <envoy_v3_api_field_config.route.v3.VirtualHost.include_attempt_count_in_response>`
 flag is set to true.
 
+.. _config_http_filters_router_x-envoy-is-timeout-retry:
+
+x-envoy-is-timeout-retry
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Sent to the upstream to indicate that the request is a retry initiated due to timeouts. Only set if the
+:ref:`include_is_timeout_retry_header <envoy_v3_api_field_config.route.v3.VirtualHost.include_is_timeout_retry_header>`
+flag is set to true.
+
 .. _config_http_filters_router_x-envoy-expected-rq-timeout-ms:
 
 x-envoy-expected-rq-timeout-ms
@@ -420,6 +433,7 @@ owning HTTP connection manager.
   rq_direct_response, Counter, Total requests that resulted in a direct response
   rq_total, Counter, Total routed requests
   rq_reset_after_downstream_response_started, Counter, Total requests that were reset after downstream response had started
+  rq_overload_local_reply, Counter, Total requests that were load shed if downstream filter load shed point is configured
 
 .. _config_http_filters_router_vcluster_stats:
 
@@ -427,7 +441,7 @@ Virtual Clusters
 ^^^^^^^^^^^^^^^^
 
 Virtual cluster statistics are output in the
-*vhost.<virtual host name>.vcluster.<virtual cluster name>.* namespace and include the following
+``vhost.<virtual host name>.vcluster.<virtual cluster name>.`` namespace and include the following
 statistics:
 
 .. csv-table::

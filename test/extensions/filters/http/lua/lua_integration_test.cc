@@ -15,7 +15,9 @@ namespace {
 class LuaIntegrationTest : public testing::TestWithParam<Network::Address::IpVersion>,
                            public HttpIntegrationTest {
 public:
-  LuaIntegrationTest() : HttpIntegrationTest(Http::CodecType::HTTP1, GetParam()) {}
+  LuaIntegrationTest() : LuaIntegrationTest(Http::CodecType::HTTP1) {}
+  LuaIntegrationTest(Http::CodecType downstream_protocol)
+      : HttpIntegrationTest(downstream_protocol, GetParam()) {}
 
   void createUpstreams() override {
     HttpIntegrationTest::createUpstreams();
@@ -238,16 +240,18 @@ TEST_P(LuaIntegrationTest, CallMetadataDuringLocalReply) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_response(response_handle)
-      local metadata = response_handle:metadata():get("foo.bar")
-      if metadata == nil then
+  default_source_code:
+    inline_string: |
+      function envoy_on_response(response_handle)
+        local metadata = response_handle:metadata():get("foo.bar")
+        if metadata == nil then
+        end
       end
-    end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE, "foo");
   std::string response;
+
   sendRawHttpAndWaitForResponse(lookupPort("http"), "GET / HTTP/1.0\r\n\r\n", &response, true);
   EXPECT_TRUE(response.find("HTTP/1.1 426 Upgrade Required\r\n") == 0);
 
@@ -263,62 +267,67 @@ TEST_P(LuaIntegrationTest, RequestAndResponse) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      request_handle:logTrace("log test")
-      request_handle:logDebug("log test")
-      request_handle:logInfo("log test")
-      request_handle:logWarn("log test")
-      request_handle:logErr("log test")
-      request_handle:logCritical("log test")
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        request_handle:logTrace("log test")
+        request_handle:logDebug("log test")
+        request_handle:logInfo("log test")
+        request_handle:logWarn("log test")
+        request_handle:logErr("log test")
+        request_handle:logCritical("log test")
 
-      local metadata = request_handle:metadata():get("foo.bar")
-      local body_length = request_handle:body():length()
+        local metadata = request_handle:metadata():get("foo.bar")
+        local body_length = request_handle:body():length()
 
-      request_handle:streamInfo():dynamicMetadata():set("envoy.lb", "foo", "bar")
-      local dynamic_metadata_value = request_handle:streamInfo():dynamicMetadata():get("envoy.lb")["foo"]
+        request_handle:streamInfo():dynamicMetadata():set("envoy.lb", "foo", "bar")
+        local dynamic_metadata_value = request_handle:streamInfo():dynamicMetadata():get("envoy.lb")["foo"]
 
-      local test_header_value_0 = request_handle:headers():getAtIndex("X-Test-Header", 0)
-      request_handle:headers():add("test_header_value_0", test_header_value_0)
-      local test_header_value_1 = request_handle:headers():getAtIndex("X-TEST-Header", 1)
-      request_handle:headers():add("test_header_value_1", test_header_value_1)
-      local test_header_value_2 = request_handle:headers():getAtIndex("x-test-header", 2)
-      if test_header_value_2 == nil then
-        request_handle:headers():add("test_header_value_2", "nil_value")
+        local test_header_value_0 = request_handle:headers():getAtIndex("X-Test-Header", 0)
+        request_handle:headers():add("test_header_value_0", test_header_value_0)
+        local test_header_value_1 = request_handle:headers():getAtIndex("X-TEST-Header", 1)
+        request_handle:headers():add("test_header_value_1", test_header_value_1)
+        local test_header_value_2 = request_handle:headers():getAtIndex("x-test-header", 2)
+        if test_header_value_2 == nil then
+          request_handle:headers():add("test_header_value_2", "nil_value")
+        end
+        local test_header_value_size = request_handle:headers():getNumValues("x-test-header")
+        request_handle:headers():add("test_header_value_size", test_header_value_size)
+        request_handle:headers():add("cookie_0", request_handle:headers():getAtIndex("set-cookie", 0))
+        request_handle:headers():add("cookie_1", request_handle:headers():getAtIndex("set-cookie", 1))
+        request_handle:headers():add("cookie_size", request_handle:headers():getNumValues("set-cookie"))
+
+        request_handle:headers():add("request_body_size", body_length)
+        request_handle:headers():add("request_metadata_foo", metadata["foo"])
+        request_handle:headers():add("request_metadata_baz", metadata["baz"])
+        if request_handle:connection():ssl() == nil then
+          request_handle:headers():add("request_secure", "false")
+        else
+          request_handle:headers():add("request_secure", "true")
+        end
+        request_handle:headers():add("request_protocol", request_handle:streamInfo():protocol())
+        request_handle:headers():add("request_dynamic_metadata_value", dynamic_metadata_value)
+        request_handle:headers():add("request_downstream_direct_local_address_value",
+          request_handle:streamInfo():downstreamDirectLocalAddress())
+        request_handle:headers():add("request_downstream_local_address_value",
+          request_handle:streamInfo():downstreamLocalAddress())
+        request_handle:headers():add("request_downstream_directremote_address_value",
+          request_handle:streamInfo():downstreamDirectRemoteAddress())
+        request_handle:headers():add("request_downstream_remote_address_value",
+          request_handle:streamInfo():downstreamRemoteAddress())
+        request_handle:headers():add("request_requested_server_name",
+          request_handle:streamInfo():requestedServerName())
       end
-      local test_header_value_size = request_handle:headers():getNumValues("x-test-header")
-      request_handle:headers():add("test_header_value_size", test_header_value_size)
-      request_handle:headers():add("cookie_0", request_handle:headers():getAtIndex("set-cookie", 0))
-      request_handle:headers():add("cookie_1", request_handle:headers():getAtIndex("set-cookie", 1))
-      request_handle:headers():add("cookie_size", request_handle:headers():getNumValues("set-cookie"))
 
-      request_handle:headers():add("request_body_size", body_length)
-      request_handle:headers():add("request_metadata_foo", metadata["foo"])
-      request_handle:headers():add("request_metadata_baz", metadata["baz"])
-      if request_handle:connection():ssl() == nil then
-        request_handle:headers():add("request_secure", "false")
-      else
-        request_handle:headers():add("request_secure", "true")
+      function envoy_on_response(response_handle)
+        local metadata = response_handle:metadata():get("foo.bar")
+        local body_length = response_handle:body():length()
+        response_handle:headers():add("response_metadata_foo", metadata["foo"])
+        response_handle:headers():add("response_metadata_baz", metadata["baz"])
+        response_handle:headers():add("response_body_size", body_length)
+        response_handle:headers():add("request_protocol", response_handle:streamInfo():protocol())
+        response_handle:headers():remove("foo")
       end
-      request_handle:headers():add("request_protocol", request_handle:streamInfo():protocol())
-      request_handle:headers():add("request_dynamic_metadata_value", dynamic_metadata_value)
-      request_handle:headers():add("request_downstream_local_address_value",
-        request_handle:streamInfo():downstreamLocalAddress())
-      request_handle:headers():add("request_downstream_directremote_address_value",
-        request_handle:streamInfo():downstreamDirectRemoteAddress())
-      request_handle:headers():add("request_requested_server_name",
-        request_handle:streamInfo():requestedServerName())
-    end
-
-    function envoy_on_response(response_handle)
-      local metadata = response_handle:metadata():get("foo.bar")
-      local body_length = response_handle:body():length()
-      response_handle:headers():add("response_metadata_foo", metadata["foo"])
-      response_handle:headers():add("response_metadata_baz", metadata["baz"])
-      response_handle:headers():add("response_body_size", body_length)
-      response_handle:headers():add("request_protocol", response_handle:streamInfo():protocol())
-      response_handle:headers():remove("foo")
-    end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -328,15 +337,24 @@ typed_config:
       {":authority", "host"},   {"x-forwarded-for", "10.0.0.1"}, {"x-test-header", "foo"},
       {"x-test-header", "bar"}, {"set-cookie", "foo;bar;"},      {"set-cookie", "1,3;2,5;"}};
 
-  auto encoder_decoder = codec_client_->startRequest(request_headers);
-  Http::StreamEncoder& encoder = encoder_decoder.first;
-  auto response = std::move(encoder_decoder.second);
-  Buffer::OwnedImpl request_data1("hello");
-  encoder.encodeData(request_data1, false);
-  Buffer::OwnedImpl request_data2("world");
-  encoder.encodeData(request_data2, true);
+  IntegrationStreamDecoderPtr response;
+  EXPECT_LOG_CONTAINS_ALL_OF(Envoy::ExpectedLogMessages({{"trace", "log test"},
+                                                         {"debug", "log test"},
+                                                         {"info", "log test"},
+                                                         {"warn", "log test"},
+                                                         {"error", "log test"},
+                                                         {"critical", "log test"}}),
+                             {
+                               auto encoder_decoder = codec_client_->startRequest(request_headers);
+                               Http::StreamEncoder& encoder = encoder_decoder.first;
+                               response = std::move(encoder_decoder.second);
+                               Buffer::OwnedImpl request_data1("hello");
+                               encoder.encodeData(request_data1, false);
+                               Buffer::OwnedImpl request_data2("world");
+                               encoder.encodeData(request_data2, true);
 
-  waitForNextUpstreamRequest();
+                               waitForNextUpstreamRequest();
+                             });
   EXPECT_EQ("foo", upstream_request_->headers()
                        .get(Http::LowerCaseString("test_header_value_0"))[0]
                        ->value()
@@ -401,6 +419,13 @@ typed_config:
                        ->value()
                        .getStringView());
 
+  EXPECT_TRUE(absl::StrContains(
+      upstream_request_->headers()
+          .get(Http::LowerCaseString("request_downstream_direct_local_address_value"))[0]
+          ->value()
+          .getStringView(),
+      GetParam() == Network::Address::IpVersion::v4 ? "127.0.0.1:" : "[::1]:"));
+
   EXPECT_TRUE(
       absl::StrContains(upstream_request_->headers()
                             .get(Http::LowerCaseString("request_downstream_local_address_value"))[0]
@@ -414,6 +439,12 @@ typed_config:
           ->value()
           .getStringView(),
       GetParam() == Network::Address::IpVersion::v4 ? "127.0.0.1:" : "[::1]:"));
+
+  EXPECT_EQ("10.0.0.1:0",
+            upstream_request_->headers()
+                .get(Http::LowerCaseString("request_downstream_remote_address_value"))[0]
+                ->value()
+                .getStringView());
 
   EXPECT_EQ("", upstream_request_->headers()
                     .get(Http::LowerCaseString("request_requested_server_name"))[0]
@@ -457,21 +488,22 @@ TEST_P(LuaIntegrationTest, UpstreamHttpCall) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      local headers, body = request_handle:httpCall(
-      "lua_cluster",
-      {
-        [":method"] = "POST",
-        [":path"] = "/",
-        [":authority"] = "lua_cluster"
-      },
-      "hello world",
-      5000)
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        local headers, body = request_handle:httpCall(
+        "lua_cluster",
+        {
+          [":method"] = "POST",
+          [":path"] = "/",
+          [":authority"] = "lua_cluster"
+        },
+        "hello world",
+        5000)
 
-      request_handle:headers():add("upstream_foo", headers["foo"])
-      request_handle:headers():add("upstream_body_size", #body)
-    end
+        request_handle:headers():add("upstream_foo", headers["foo"])
+        request_handle:headers():add("upstream_body_size", #body)
+      end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -515,12 +547,13 @@ TEST_P(LuaIntegrationTest, Respond) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      request_handle:respond(
-        {[":status"] = "403"},
-        "nope")
-    end
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        request_handle:respond(
+          {[":status"] = "403"},
+          "nope")
+      end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -551,23 +584,24 @@ TEST_P(LuaIntegrationTest, UpstreamCallAndRespond) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      local headers, body = request_handle:httpCall(
-      "lua_cluster",
-      {
-        [":method"] = "POST",
-        [":path"] = "/",
-        [":authority"] = "lua_cluster"
-      },
-      "hello world",
-      5000)
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        local headers, body = request_handle:httpCall(
+        "lua_cluster",
+        {
+          [":method"] = "POST",
+          [":path"] = "/",
+          [":authority"] = "lua_cluster"
+        },
+        "hello world",
+        5000)
 
-      request_handle:respond(
-        {[":status"] = "403",
-         ["upstream_foo"] = headers["foo"]},
-        "nope")
-    end
+        request_handle:respond(
+          {[":status"] = "403",
+          ["upstream_foo"] = headers["foo"]},
+          "nope")
+      end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -601,19 +635,20 @@ TEST_P(LuaIntegrationTest, UpstreamAsyncHttpCall) {
 name: envoy.filters.http.lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      local headers, body = request_handle:httpCall(
-      "lua_cluster",
-      {
-        [":method"] = "POST",
-        [":path"] = "/",
-        [":authority"] = "lua_cluster"
-      },
-      "hello world",
-      5000,
-      true)
-    end
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        local headers, body = request_handle:httpCall(
+        "lua_cluster",
+        {
+          [":method"] = "POST",
+          [":path"] = "/",
+          [":authority"] = "lua_cluster"
+        },
+        "hello world",
+        5000,
+        true)
+      end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -651,11 +686,12 @@ TEST_P(LuaIntegrationTest, ChangeRoute) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      request_handle:headers():remove(":path")
-      request_handle:headers():add(":path", "/alt/route")
-    end
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        request_handle:headers():remove(":path")
+        request_handle:headers():add(":path", "/alt/route")
+      end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -685,10 +721,11 @@ TEST_P(LuaIntegrationTest, SurviveMultipleCalls) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      request_handle:streamInfo():dynamicMetadata()
-    end
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        request_handle:streamInfo():dynamicMetadata()
+      end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -721,58 +758,59 @@ TEST_P(LuaIntegrationTest, SignatureVerification) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function string.fromhex(str)
-      return (str:gsub('..', function (cc)
-        return string.char(tonumber(cc, 16))
-      end))
-    end
-
-    -- decoding
-    function dec(data)
-      local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-      data = string.gsub(data, '[^'..b..'=]', '')
-      return (data:gsub('.', function(x)
-        if (x == '=') then return '' end
-        local r,f='',(b:find(x)-1)
-        for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end
-        return r;
-      end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
-        if (#x ~= 8) then return '' end
-        local c=0
-        for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end
-        return string.char(c)
-      end))
-    end
-
-    function envoy_on_request(request_handle)
-      local metadata = request_handle:metadata():get("keyset")
-      local keyder = metadata[request_handle:headers():get("keyid")]
-
-      local rawkeyder = dec(keyder)
-      local pubkey = request_handle:importPublicKey(rawkeyder, string.len(rawkeyder)):get()
-
-      if pubkey == nil then
-        request_handle:logErr("log test")
-        request_handle:headers():add("signature_verification", "rejected")
-        return
+  default_source_code:
+    inline_string: |
+      function string.fromhex(str)
+        return (str:gsub('..', function (cc)
+          return string.char(tonumber(cc, 16))
+        end))
       end
 
-      local hash = request_handle:headers():get("hash")
-      local sig = request_handle:headers():get("signature")
-      local rawsig = sig:fromhex()
-      local data = request_handle:headers():get("message")
-      local ok, error = request_handle:verifySignature(hash, pubkey, rawsig, string.len(rawsig), data, string.len(data))
-
-      if ok then
-        request_handle:headers():add("signature_verification", "approved")
-      else
-        request_handle:logErr(error)
-        request_handle:headers():add("signature_verification", "rejected")
+      -- decoding
+      function dec(data)
+        local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+        data = string.gsub(data, '[^'..b..'=]', '')
+        return (data:gsub('.', function(x)
+          if (x == '=') then return '' end
+          local r,f='',(b:find(x)-1)
+          for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end
+          return r;
+        end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
+          if (#x ~= 8) then return '' end
+          local c=0
+          for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end
+          return string.char(c)
+        end))
       end
 
-      request_handle:headers():add("verification", "done")
-    end
+      function envoy_on_request(request_handle)
+        local metadata = request_handle:metadata():get("keyset")
+        local keyder = metadata[request_handle:headers():get("keyid")]
+
+        local rawkeyder = dec(keyder)
+        local pubkey = request_handle:importPublicKey(rawkeyder, string.len(rawkeyder)):get()
+
+        if pubkey == nil then
+          request_handle:logErr("log test")
+          request_handle:headers():add("signature_verification", "rejected")
+          return
+        end
+
+        local hash = request_handle:headers():get("hash")
+        local sig = request_handle:headers():get("signature")
+        local rawsig = sig:fromhex()
+        local data = request_handle:headers():get("message")
+        local ok, error = request_handle:verifySignature(hash, pubkey, rawsig, string.len(rawsig), data, string.len(data))
+
+        if ok then
+          request_handle:headers():add("signature_verification", "approved")
+        else
+          request_handle:logErr(error)
+          request_handle:headers():add("signature_verification", "rejected")
+        end
+
+        request_handle:headers():add("verification", "done")
+      end
 )EOF";
 
   initializeFilter(FILTER_AND_CODE);
@@ -818,10 +856,11 @@ const std::string FILTER_AND_CODE =
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_request(request_handle)
-      request_handle:headers():add("code", "code_from_global")
-    end
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        request_handle:headers():add("code", "code_from_global")
+      end
   source_codes:
     hello.lua:
       inline_string: |
@@ -851,7 +890,7 @@ virtual_hosts:
     route:
       cluster: lua_cluster
     typed_per_filter_config:
-      envoy.filters.http.lua:
+      lua:
         "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
         disabled: true
   - match:
@@ -859,7 +898,7 @@ virtual_hosts:
     route:
       cluster: lua_cluster
     typed_per_filter_config:
-      envoy.filters.http.lua:
+      lua:
         "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
         name: hello.lua
   - match:
@@ -867,7 +906,7 @@ virtual_hosts:
     route:
       cluster: lua_cluster
     typed_per_filter_config:
-      envoy.filters.http.lua:
+      lua:
         "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
         name: byebye.lua
   - match:
@@ -875,7 +914,7 @@ virtual_hosts:
     route:
       cluster: lua_cluster
     typed_per_filter_config:
-      envoy.filters.http.lua:
+      lua:
         "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
         source_code:
           inline_string: |
@@ -887,7 +926,7 @@ virtual_hosts:
     route:
       cluster: lua_cluster
     typed_per_filter_config:
-      envoy.filters.http.lua:
+      lua:
         "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
         name: nocode.lua
 )EOF";
@@ -904,7 +943,7 @@ virtual_hosts:
     route:
       cluster: lua_cluster
     typed_per_filter_config:
-      envoy.filters.http.lua:
+      lua:
         "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
         source_code:
           inline_string: |
@@ -916,7 +955,7 @@ virtual_hosts:
     route:
       cluster: lua_cluster
     typed_per_filter_config:
-      envoy.filters.http.lua:
+      lua:
         "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
         source_code:
           inline_string: |
@@ -951,7 +990,7 @@ TEST_P(LuaIntegrationTest, BasicTestOfLuaPerRoute) {
     EXPECT_EQ("200", response->headers().getStatusValue());
   };
 
-  // Lua code defined in 'inline_code' will be executed by default.
+  // Lua code defined in 'default_source_code' will be executed by default.
   Http::TestRequestHeaderMapImpl default_headers{{":method", "GET"},
                                                  {":path", "/lua/per/route/default"},
                                                  {":scheme", "http"},
@@ -1007,10 +1046,11 @@ TEST_P(LuaIntegrationTest, DirectResponseLuaMetadata) {
   name: lua
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-    inline_code: |
-      function envoy_on_response(response_handle)
-        response_handle:headers():add('foo', response_handle:metadata():get('foo') or 'nil')
-      end
+    default_source_code:
+      inline_string: |
+        function envoy_on_response(response_handle)
+          response_handle:headers():add('foo', response_handle:metadata():get('foo') or 'nil')
+        end
 )EOF";
 
   std::string route_config =
@@ -1035,7 +1075,7 @@ virtual_hosts:
   initializeWithYaml(filter_config, route_config);
   codec_client_ = makeHttpConnection(lookupPort("http"));
 
-  // Lua code defined in 'inline_code' will be executed by default.
+  // Lua code defined in 'default_source_code' will be executed by default.
   Http::TestRequestHeaderMapImpl default_headers{{":method", "GET"},
                                                  {":path", "/lua/direct_response"},
                                                  {":scheme", "http"},
@@ -1128,13 +1168,14 @@ TEST_P(LuaIntegrationTest, RewriteResponseBuffer) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_response(response_handle)
-      local content_length = response_handle:body():setBytes("ok")
-      response_handle:logTrace(content_length)
+  default_source_code:
+    inline_string: |
+      function envoy_on_response(response_handle)
+        local content_length = response_handle:body():setBytes("ok")
+        response_handle:logTrace(content_length)
 
-      response_handle:headers():replace("content-length", content_length)
-    end
+        response_handle:headers():replace("content-length", content_length)
+      end
 )EOF";
 
   testRewriteResponse(FILTER_AND_CODE);
@@ -1148,13 +1189,14 @@ TEST_P(LuaIntegrationTest, RewriteResponseBufferWithoutUpstreamBody) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_response(response_handle)
-      local content_length = response_handle:body(true):setBytes("ok")
-      response_handle:logTrace(content_length)
+  default_source_code:
+    inline_string: |
+      function envoy_on_response(response_handle)
+        local content_length = response_handle:body(true):setBytes("ok")
+        response_handle:logTrace(content_length)
 
-      response_handle:headers():replace("content-length", content_length)
-    end
+        response_handle:headers():replace("content-length", content_length)
+      end
 )EOF";
 
   testRewriteResponseWithoutUpstreamBody(FILTER_AND_CODE, true);
@@ -1168,14 +1210,15 @@ TEST_P(LuaIntegrationTest, RewriteResponseBufferWithoutUpstreamBodyAndDisableWra
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_response(response_handle)
-      if response_handle:body(false) then
-        local content_length = response_handle:body():setBytes("ok")
-        response_handle:logTrace(content_length)
-        response_handle:headers():replace("content-length", content_length)
+  default_source_code:
+    inline_string: |
+      function envoy_on_response(response_handle)
+        if response_handle:body(false) then
+          local content_length = response_handle:body():setBytes("ok")
+          response_handle:logTrace(content_length)
+          response_handle:headers():replace("content-length", content_length)
+        end
       end
-    end
 )EOF";
 
   testRewriteResponseWithoutUpstreamBody(FILTER_AND_CODE, false);
@@ -1188,16 +1231,17 @@ TEST_P(LuaIntegrationTest, RewriteChunkedBody) {
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_response(response_handle)
-      response_handle:headers():replace("content-length", 2)
-      local last
-      for chunk in response_handle:bodyChunks() do
-        chunk:setBytes("")
-        last = chunk
+  default_source_code:
+    inline_string: |
+      function envoy_on_response(response_handle)
+        response_handle:headers():replace("content-length", 2)
+        local last
+        for chunk in response_handle:bodyChunks() do
+          chunk:setBytes("")
+          last = chunk
+        end
+        last:setBytes("ok")
       end
-      last:setBytes("ok")
-    end
 )EOF";
 
   testRewriteResponse(FILTER_AND_CODE);
@@ -1209,14 +1253,91 @@ TEST_P(LuaIntegrationTest, RewriteResponseBufferWithoutHeaderReplaceContentLengt
 name: lua
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-  inline_code: |
-    function envoy_on_response(response_handle)
-      local content_length = response_handle:body():setBytes("ok")
-      response_handle:logTrace(content_length)
-    end
+  default_source_code:
+    inline_string: |
+      function envoy_on_response(response_handle)
+        local content_length = response_handle:body():setBytes("ok")
+        response_handle:logTrace(content_length)
+      end
 )EOF";
 
   testRewriteResponse(FILTER_AND_CODE);
+}
+
+// Test whether setting the HTTP1 reason phrase
+TEST_P(LuaIntegrationTest, Http1ReasonPhrase) {
+  const std::string FILTER_AND_CODE =
+      R"EOF(
+name: lua
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+  default_source_code:
+    inline_string: |
+      function envoy_on_response(response_handle)
+        response_handle:headers():setHttp1ReasonPhrase("Slow Down")
+      end
+)EOF";
+
+  initializeFilter(FILTER_AND_CODE);
+
+  std::string response;
+  sendRawHttpAndWaitForResponse(lookupPort("http"), "GET / HTTP/1.1\r\n\r\n", &response, true);
+  EXPECT_TRUE(response.find("HTTP/1.1 400 Slow Down\r\n") == 0);
+}
+
+// Lua tests that need HTTP2.
+class Http2LuaIntegrationTest : public LuaIntegrationTest {
+protected:
+  Http2LuaIntegrationTest() : LuaIntegrationTest(Http::CodecType::HTTP2) {}
+};
+
+INSTANTIATE_TEST_SUITE_P(IpVersions, Http2LuaIntegrationTest,
+                         testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),
+                         TestUtility::ipTestParamsToString);
+
+// Test sending local reply due to too much data. HTTP2 is needed as it
+// will propagate the end stream from the downstream in the same decodeData
+// call the filter receives the downstream request body.
+TEST_P(Http2LuaIntegrationTest, LocalReplyWhenWaitingForBodyFollowedByHttpRequest) {
+  const std::string FILTER_AND_CODE =
+      R"EOF(
+name: lua
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+  default_source_code:
+    inline_string: |
+      function envoy_on_request(request_handle)
+        local initial_req_body = request_handle:body()
+        local headers, body = request_handle:httpCall(
+        "lua_cluster",
+        {
+          [":method"] = "POST",
+          [":path"] = "/",
+          [":authority"] = "lua_cluster"
+        },
+        "hello world",
+        1000)
+        request_handle:headers():replace("x-code", headers["code"] or "")
+      end
+)EOF";
+
+  // Set low buffer limits to allow us to trigger local reply easy.
+  const int buffer_limit = 65535;
+  config_helper_.setBufferLimits(buffer_limit, buffer_limit);
+
+  initializeFilter(FILTER_AND_CODE);
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+  auto encoder_decoder =
+      codec_client_->startRequest(Http::TestRequestHeaderMapImpl{{":method", "POST"},
+                                                                 {":scheme", "http"},
+                                                                 {":path", "/test/long/url"},
+                                                                 {":authority", "host"}});
+  auto request_encoder = &encoder_decoder.first;
+  auto response = std::move(encoder_decoder.second);
+
+  codec_client_->sendData(*request_encoder, buffer_limit + 1, true);
+  ASSERT_TRUE(response->waitForEndStream());
+  EXPECT_TRUE(response->complete());
 }
 
 } // namespace

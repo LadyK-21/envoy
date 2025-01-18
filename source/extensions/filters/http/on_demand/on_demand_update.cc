@@ -6,6 +6,7 @@
 #include "source/common/config/xds_resource.h"
 #include "source/common/http/codes.h"
 #include "source/common/http/utility.h"
+#include "source/common/upstream/od_cds_api_impl.h"
 #include "source/extensions/filters/http/well_known_names.h"
 
 namespace Envoy {
@@ -59,10 +60,14 @@ DecodeHeadersBehaviorPtr createDecodeHeadersBehavior(
   }
   Upstream::OdCdsApiHandlePtr odcds;
   if (odcds_config->resources_locator().empty()) {
-    odcds = cm.allocateOdCdsApi(odcds_config->source(), absl::nullopt, validation_visitor);
+    odcds = cm.allocateOdCdsApi(&Upstream::OdCdsApiImpl::create, odcds_config->source(),
+                                absl::nullopt, validation_visitor);
   } else {
-    auto locator = Config::XdsResourceIdentifier::decodeUrl(odcds_config->resources_locator());
-    odcds = cm.allocateOdCdsApi(odcds_config->source(), locator, validation_visitor);
+    auto locator = THROW_OR_RETURN_VALUE(
+        Config::XdsResourceIdentifier::decodeUrl(odcds_config->resources_locator()),
+        xds::core::v3::ResourceLocator);
+    odcds = cm.allocateOdCdsApi(&Upstream::OdCdsApiImpl::create, odcds_config->source(), locator,
+                                validation_visitor);
   }
   // If changing the default timeout, please update the documentation in on_demand.proto too.
   auto timeout =
@@ -115,14 +120,14 @@ OptRef<const Router::Route> OnDemandRouteUpdate::handleMissingRoute() {
       std::make_shared<Http::RouteConfigUpdatedCallback>(Http::RouteConfigUpdatedCallback(
           [this](bool route_exists) -> void { onRouteConfigUpdateCompletion(route_exists); }));
   filter_iteration_state_ = Http::FilterHeadersStatus::StopIteration;
-  callbacks_->requestRouteConfigUpdate(route_config_updated_callback_);
+  callbacks_->downstreamCallbacks()->requestRouteConfigUpdate(route_config_updated_callback_);
   // decodeHeaders() is completed.
   decode_headers_active_ = false;
   return makeOptRefFromPtr(callbacks_->route().get());
 }
 
 Http::FilterHeadersStatus OnDemandRouteUpdate::decodeHeaders(Http::RequestHeaderMap&, bool) {
-  auto config = getConfig(callbacks_->route());
+  auto config = getConfig();
 
   config->decodeHeadersBehavior().decodeHeaders(*this);
   return filter_iteration_state_;
@@ -159,10 +164,8 @@ void OnDemandRouteUpdate::handleOnDemandCds(const Router::Route& route,
       odcds.requestOnDemandClusterDiscovery(cluster_name, std::move(callback), timeout);
 }
 
-const OnDemandFilterConfig*
-OnDemandRouteUpdate::getConfig(const Router::RouteConstSharedPtr& route) {
-  auto config = Http::Utility::resolveMostSpecificPerFilterConfig<OnDemandFilterConfig>(
-      HttpFilterNames::get().OnDemand, route);
+const OnDemandFilterConfig* OnDemandRouteUpdate::getConfig() {
+  auto config = Http::Utility::resolveMostSpecificPerFilterConfig<OnDemandFilterConfig>(callbacks_);
   if (config != nullptr) {
     return config;
   }
@@ -223,7 +226,7 @@ void OnDemandRouteUpdate::onClusterDiscoveryCompletion(
       !callbacks_->decodingBuffer()) { // Redirects with body not yet supported.
     const Http::ResponseHeaderMap* headers = nullptr;
     if (callbacks_->recreateStream(headers)) {
-      callbacks_->clearRouteCache();
+      callbacks_->downstreamCallbacks()->clearRouteCache();
       return;
     }
   }

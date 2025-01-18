@@ -3,8 +3,8 @@
 Tap
 ===
 
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.tap.v3.Tap``.
 * :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.tap.v3.Tap>`
-* This filter should be configured with the name *envoy.filters.http.tap*.
 
 .. attention::
 
@@ -307,7 +307,7 @@ Etc.
 Statistics
 ----------
 
-The tap filter outputs statistics in the *http.<stat_prefix>.tap.* namespace. The :ref:`stat prefix
+The tap filter outputs statistics in the ``http.<stat_prefix>.tap.`` namespace. The :ref:`stat prefix
 <envoy_v3_api_field_extensions.filters.network.http_connection_manager.v3.HttpConnectionManager.stat_prefix>`
 comes from the owning HTTP connection manager.
 

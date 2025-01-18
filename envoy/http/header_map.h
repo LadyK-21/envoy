@@ -3,15 +3,17 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
+#include <iosfwd>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "envoy/common/optref.h"
 #include "envoy/common/pure.h"
+#include "envoy/common/union_string.h"
 #include "envoy/http/header_formatter.h"
-#include "envoy/tracing/trace_context.h"
+#include "envoy/stream_info/filter_state.h"
 
 #include "source/common/common/assert.h"
 #include "source/common/common/hash.h"
@@ -97,147 +99,34 @@ private:
 using LowerCaseStrPairVector =
     std::vector<std::pair<const Http::LowerCaseString, const std::string>>;
 
-/**
- * Convenient type for an inline vector that will be used by HeaderString.
- */
-using InlineHeaderVector = absl::InlinedVector<char, 128>;
-
-/**
- * Convenient type for the underlying type of HeaderString that allows a variant
- * between string_view and the InlinedVector.
- */
-using VariantHeader = absl::variant<absl::string_view, InlineHeaderVector>;
-
-/**
- * This is a string implementation for use in header processing. It is heavily optimized for
- * performance. It supports 2 different types of storage and can switch between them:
- * 1) A reference.
- * 2) An InlinedVector (an optimized interned string for small strings, but allows heap
- * allocation if needed).
- */
-class HeaderString {
+class HeaderStringValidator {
 public:
-  /**
-   * Default constructor. Sets up for inline storage.
-   */
-  HeaderString();
+  bool operator()(absl::string_view view) {
+    return disable_validation_for_tests_ ? true : validHeaderString(view);
+  }
+
+  // This flag allows disabling the check for the NUL, CR and LF characters in the
+  // header names or values in the DEBUG builds to prevent the `ASSERT(valid())` in the
+  // HeaderString constructor from failing tests.
+  static bool disable_validation_for_tests_;
+};
+
+class HeaderString : public UnionStringBase<HeaderStringValidator> {
+public:
+  using UnionStringBase::UnionStringBase;
 
   /**
-   * Constructor for a string reference.
+   * Constructor for a lower case string reference.
    * @param ref_value MUST point to data that will live beyond the lifetime of any request/response
    *        using the string (since a codec may optimize for zero copy).
    */
-  explicit HeaderString(const LowerCaseString& ref_value);
+  explicit HeaderString(const LowerCaseString& ref_value) noexcept;
 
   /**
-   * Constructor for a string reference.
-   * @param ref_value MUST point to data that will live beyond the lifetime of any request/response
-   *        using the string (since a codec may optimize for zero copy).
+   * Constructor for normal UnionString instance.
+   * @param move_value moveable UnionString. The string value MUST be valid header string.
    */
-  explicit HeaderString(absl::string_view ref_value);
-
-  HeaderString(HeaderString&& move_value) noexcept;
-  ~HeaderString() = default;
-
-  /**
-   * Append data to an existing string. If the string is a reference string the reference data is
-   * not copied.
-   */
-  void append(const char* data, uint32_t size);
-
-  /**
-   * Transforms the inlined vector data using the given UnaryOperation (conforms
-   * to std::transform).
-   * @param unary_op the operations to be performed on each of the elements.
-   */
-  template <typename UnaryOperation> void inlineTransform(UnaryOperation&& unary_op) {
-    ASSERT(type() == Type::Inline);
-    std::transform(absl::get<InlineHeaderVector>(buffer_).begin(),
-                   absl::get<InlineHeaderVector>(buffer_).end(),
-                   absl::get<InlineHeaderVector>(buffer_).begin(), unary_op);
-  }
-
-  /**
-   * Trim trailing whitespaces from the HeaderString. Only supported by the "Inline" HeaderString
-   * representation.
-   */
-  void rtrim();
-
-  /**
-   * Get an absl::string_view. It will NOT be NUL terminated!
-   *
-   * @return an absl::string_view.
-   */
-  absl::string_view getStringView() const;
-
-  /**
-   * Return the string to a default state. Reference strings are not touched. Both inline/dynamic
-   * strings are reset to zero size.
-   */
-  void clear();
-
-  /**
-   * @return whether the string is empty or not.
-   */
-  bool empty() const { return size() == 0; }
-
-  // Looking for find? Use getStringView().find()
-
-  /**
-   * Set the value of the string by copying data into it. This overwrites any existing string.
-   */
-  void setCopy(const char* data, uint32_t size);
-
-  /**
-   * Set the value of the string by copying data into it. This overwrites any existing string.
-   */
-  void setCopy(absl::string_view view);
-
-  /**
-   * Set the value of the string to an integer. This overwrites any existing string.
-   */
-  void setInteger(uint64_t value);
-
-  /**
-   * Set the value of the string to a string reference.
-   * @param ref_value MUST point to data that will live beyond the lifetime of any request/response
-   *        using the string (since a codec may optimize for zero copy).
-   */
-  void setReference(absl::string_view ref_value);
-
-  /**
-   * @return whether the string is a reference or an InlinedVector.
-   */
-  bool isReference() const { return type() == Type::Reference; }
-
-  /**
-   * @return the size of the string, not including the null terminator.
-   */
-  uint32_t size() const;
-
-  bool operator==(const char* rhs) const {
-    return getStringView() == absl::NullSafeStringView(rhs);
-  }
-  bool operator==(absl::string_view rhs) const { return getStringView() == rhs; }
-  bool operator!=(const char* rhs) const {
-    return getStringView() != absl::NullSafeStringView(rhs);
-  }
-  bool operator!=(absl::string_view rhs) const { return getStringView() != rhs; }
-
-  // Test only method that does not have validation and allows setting arbitrary values.
-  void setCopyUnvalidatedForTestOnly(absl::string_view view);
-
-private:
-  enum class Type { Reference, Inline };
-
-  VariantHeader buffer_;
-
-  bool valid() const;
-
-  /**
-   * @return the type of backing storage for the string.
-   */
-  Type type() const;
+  explicit HeaderString(UnionString&& move_value) noexcept;
 };
 
 /**
@@ -300,6 +189,7 @@ private:
   HEADER_FUNC(EnvoyRetryGrpcOn)                                                                    \
   HEADER_FUNC(EnvoyRetriableStatusCodes)                                                           \
   HEADER_FUNC(EnvoyRetriableHeaderNames)                                                           \
+  HEADER_FUNC(EnvoyIsTimeoutRetry)                                                                 \
   HEADER_FUNC(EnvoyOriginalPath)                                                                   \
   HEADER_FUNC(EnvoyOriginalUrl)                                                                    \
   HEADER_FUNC(EnvoyUpstreamAltStatName)                                                            \
@@ -323,7 +213,8 @@ private:
   HEADER_FUNC(EnvoyMaxRetries)                                                                     \
   HEADER_FUNC(EnvoyUpstreamRequestTimeoutMs)                                                       \
   HEADER_FUNC(EnvoyUpstreamRequestPerTryTimeoutMs)                                                 \
-  HEADER_FUNC(EnvoyUpstreamStreamDurationMs)
+  HEADER_FUNC(EnvoyUpstreamStreamDurationMs)                                                       \
+  HEADER_FUNC(ForwardedPort)
 
 #define INLINE_REQ_HEADERS(HEADER_FUNC)                                                            \
   INLINE_REQ_STRING_HEADERS(HEADER_FUNC)                                                           \
@@ -469,7 +360,7 @@ public:
   virtual void addReferenceKey(const LowerCaseString& key, uint64_t value) PURE;
 
   /**
-   * Add a header with a reference key to the map. The key MUST point to point to data that will
+   * Add a header with a reference key to the map. The key MUST point to data that will
    * live beyond the lifetime of any request/response using the string (since a codec may optimize
    * for zero copy). The value will be copied.
    *
@@ -564,6 +455,16 @@ public:
    * values and does not account for data structure overhead.
    */
   virtual uint64_t byteSize() const PURE;
+
+  /**
+   * @return uint32_t the max size of the header map in kilobyte.
+   */
+  virtual uint32_t maxHeadersKb() const PURE;
+
+  /**
+   * @return uint32_t the max count of headers in a header map.
+   */
+  virtual uint32_t maxHeadersCount() const PURE;
 
   /**
    * This is a wrapper for the return result from get(). It avoids a copy when translating from
@@ -690,8 +591,9 @@ using HeaderMapPtr = std::unique_ptr<HeaderMap>;
  * Wraps a set of header modifications.
  */
 struct HeaderTransforms {
-  std::vector<std::pair<Http::LowerCaseString, std::string>> headers_to_append;
-  std::vector<std::pair<Http::LowerCaseString, std::string>> headers_to_overwrite;
+  std::vector<std::pair<Http::LowerCaseString, std::string>> headers_to_append_or_add;
+  std::vector<std::pair<Http::LowerCaseString, std::string>> headers_to_overwrite_or_add;
+  std::vector<std::pair<Http::LowerCaseString, std::string>> headers_to_add_if_absent;
   std::vector<Http::LowerCaseString> headers_to_remove;
 };
 
@@ -826,13 +728,14 @@ public:
 // Request headers.
 class RequestHeaderMap
     : public RequestOrResponseHeaderMap,
-      public CustomInlineHeaderBase<CustomInlineHeaderRegistry::Type::RequestHeaders>,
-      public Tracing::TraceContext {
+      public CustomInlineHeaderBase<CustomInlineHeaderRegistry::Type::RequestHeaders> {
 public:
   INLINE_REQ_STRING_HEADERS(DEFINE_INLINE_STRING_HEADER)
   INLINE_REQ_NUMERIC_HEADERS(DEFINE_INLINE_NUMERIC_HEADER)
 };
 using RequestHeaderMapPtr = std::unique_ptr<RequestHeaderMap>;
+using RequestHeaderMapSharedPtr = std::shared_ptr<RequestHeaderMap>;
+using RequestHeaderMapConstSharedPtr = std::shared_ptr<const RequestHeaderMap>;
 using RequestHeaderMapOptRef = OptRef<RequestHeaderMap>;
 using RequestHeaderMapOptConstRef = OptRef<const RequestHeaderMap>;
 
@@ -863,6 +766,8 @@ public:
   INLINE_RESP_NUMERIC_HEADERS(DEFINE_INLINE_NUMERIC_HEADER)
 };
 using ResponseHeaderMapPtr = std::unique_ptr<ResponseHeaderMap>;
+using ResponseHeaderMapSharedPtr = std::shared_ptr<ResponseHeaderMap>;
+using ResponseHeaderMapConstSharedPtr = std::shared_ptr<const ResponseHeaderMap>;
 using ResponseHeaderMapOptRef = OptRef<ResponseHeaderMap>;
 using ResponseHeaderMapOptConstRef = OptRef<const ResponseHeaderMap>;
 
@@ -872,8 +777,18 @@ class ResponseTrailerMap
       public HeaderMap,
       public CustomInlineHeaderBase<CustomInlineHeaderRegistry::Type::ResponseTrailers> {};
 using ResponseTrailerMapPtr = std::unique_ptr<ResponseTrailerMap>;
+using ResponseTrailerMapSharedPtr = std::shared_ptr<ResponseTrailerMap>;
+using ResponseTrailerMapConstSharedPtr = std::shared_ptr<const ResponseTrailerMap>;
 using ResponseTrailerMapOptRef = OptRef<ResponseTrailerMap>;
 using ResponseTrailerMapOptConstRef = OptRef<const ResponseTrailerMap>;
+
+/**
+ * Base class for both tunnel response headers and trailers.
+ */
+class TunnelResponseHeadersOrTrailers : public StreamInfo::FilterState::Object {
+public:
+  virtual const HeaderMap& value() const PURE;
+};
 
 /**
  * Convenient container type for storing Http::LowerCaseString and std::string key/value pairs.
@@ -897,3 +812,15 @@ using HeaderMatcherSharedPtr = std::shared_ptr<HeaderMatcher>;
 
 } // namespace Http
 } // namespace Envoy
+
+// NOLINT(namespace-envoy)
+namespace fmt {
+// Allow fmtlib to use operator << defined in HeaderMap and LowerCaseString
+template <> struct formatter<::Envoy::Http::LowerCaseString> : ostream_formatter {};
+
+template <typename HeaderMapType>
+struct formatter<
+    HeaderMapType,
+    std::enable_if_t<std::is_base_of<::Envoy::Http::HeaderMap, HeaderMapType>::value, char>>
+    : ostream_formatter {};
+} // namespace fmt

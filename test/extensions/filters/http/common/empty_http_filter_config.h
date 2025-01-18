@@ -19,10 +19,10 @@ namespace Common {
  */
 class EmptyHttpFilterConfig : public Server::Configuration::NamedHttpFilterConfigFactory {
 public:
-  virtual Http::FilterFactoryCb createFilter(const std::string& stat_prefix,
-                                             Server::Configuration::FactoryContext& context) PURE;
+  virtual absl::StatusOr<Http::FilterFactoryCb>
+  createFilter(const std::string& stat_prefix, Server::Configuration::FactoryContext& context) PURE;
 
-  Http::FilterFactoryCb
+  absl::StatusOr<Http::FilterFactoryCb>
   createFilterFactoryFromProto(const Protobuf::Message&, const std::string& stat_prefix,
                                Server::Configuration::FactoryContext& context) override {
     return createFilter(stat_prefix, context);
@@ -42,6 +42,30 @@ protected:
 
 private:
   const std::string name_;
+};
+
+class UpstreamFilterConfig : public Server::Configuration::UpstreamHttpFilterConfigFactory {
+public:
+  virtual absl::StatusOr<Http::FilterFactoryCb>
+  createDualFilter(const std::string& stat_prefix,
+                   Server::Configuration::ServerFactoryContext& context) PURE;
+
+  absl::StatusOr<Http::FilterFactoryCb>
+  createFilterFactoryFromProto(const Protobuf::Message&, const std::string& stat_prefix,
+                               Server::Configuration::UpstreamFactoryContext& context) override {
+    return createDualFilter(stat_prefix, context.serverFactoryContext());
+  }
+};
+
+class EmptyHttpDualFilterConfig : public EmptyHttpFilterConfig, public UpstreamFilterConfig {
+public:
+  EmptyHttpDualFilterConfig(const std::string& name) : EmptyHttpFilterConfig(name) {}
+
+  absl::StatusOr<Http::FilterFactoryCb>
+  createFilter(const std::string& stat_prefix,
+               Server::Configuration::FactoryContext& context) override {
+    return createDualFilter(stat_prefix, context.serverFactoryContext());
+  }
 };
 
 } // namespace Common

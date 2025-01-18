@@ -17,6 +17,8 @@ namespace Extensions {
 namespace HttpFilters {
 namespace {
 
+using ::testing::Return;
+
 // Limit the number of threads for the FileSystemBufferFilterConfig.manager_config.thread_count to
 // 8 to ensure test stays responsive.
 static const uint32_t kMaxAsyncFileManagerThreadCount = 8;
@@ -36,8 +38,8 @@ void addFileDescriptorsRecursively(const Protobuf::FileDescriptor& descriptor,
 
 void addBookstoreProtoDescriptor(Protobuf::Message* message) {
   envoy::extensions::filters::http::grpc_json_transcoder::v3::GrpcJsonTranscoder& config =
-      dynamic_cast<envoy::extensions::filters::http::grpc_json_transcoder::v3::GrpcJsonTranscoder&>(
-          *message);
+      *Envoy::Protobuf::DynamicCastMessage<
+          envoy::extensions::filters::http::grpc_json_transcoder::v3::GrpcJsonTranscoder>(message);
   config.clear_services();
   config.add_services("bookstore.Bookstore");
 
@@ -80,7 +82,7 @@ void UberFilterFuzzer::guideAnyProtoType(test::fuzz::HttpData* mutable_data, uin
 
 void cleanTapConfig(Protobuf::Message* message) {
   envoy::extensions::filters::http::tap::v3::Tap& config =
-      dynamic_cast<envoy::extensions::filters::http::tap::v3::Tap&>(*message);
+      *Envoy::Protobuf::DynamicCastMessage<envoy::extensions::filters::http::tap::v3::Tap>(message);
   if (config.common_config().config_type_case() ==
       envoy::extensions::common::tap::v3::CommonExtensionConfig::ConfigTypeCase::kStaticConfig) {
     auto const& output_config = config.common_config().static_config().output_config();
@@ -108,9 +110,9 @@ void cleanTapConfig(Protobuf::Message* message) {
 
 void cleanFileSystemBufferConfig(Protobuf::Message* message) {
   envoy::extensions::filters::http::file_system_buffer::v3::FileSystemBufferFilterConfig& config =
-      dynamic_cast<
-          envoy::extensions::filters::http::file_system_buffer::v3::FileSystemBufferFilterConfig&>(
-          *message);
+      *Envoy::Protobuf::DynamicCastMessage<
+          envoy::extensions::filters::http::file_system_buffer::v3::FileSystemBufferFilterConfig>(
+          message);
   if (config.manager_config().thread_pool().thread_count() > kMaxAsyncFileManagerThreadCount) {
     throw EnvoyException(fmt::format(
         "received input exceeding the allowed number of threads ({} > {}) for "
@@ -139,16 +141,19 @@ void UberFilterFuzzer::perFilterSetup() {
   addr_ = std::make_shared<Network::Address::Ipv4Instance>("1.2.3.4", 1111);
   connection_.stream_info_.downstream_connection_info_provider_->setRemoteAddress(addr_);
   connection_.stream_info_.downstream_connection_info_provider_->setLocalAddress(addr_);
-  ON_CALL(factory_context_, clusterManager()).WillByDefault(testing::ReturnRef(cluster_manager_));
+  ON_CALL(factory_context_.server_factory_context_, clusterManager())
+      .WillByDefault(testing::ReturnRef(cluster_manager_));
   ON_CALL(cluster_manager_.thread_local_cluster_.async_client_, send_(_, _, _))
       .WillByDefault(Return(&async_request_));
 
-  ON_CALL(decoder_callbacks_, connection()).WillByDefault(testing::Return(&connection_));
+  ON_CALL(decoder_callbacks_, connection())
+      .WillByDefault(testing::Return(OptRef<const Network::Connection>{connection_}));
   ON_CALL(decoder_callbacks_, activeSpan())
       .WillByDefault(testing::ReturnRef(Tracing::NullSpan::instance()));
   decoder_callbacks_.stream_info_.protocol_ = Envoy::Http::Protocol::Http2;
 
-  ON_CALL(encoder_callbacks_, connection()).WillByDefault(testing::Return(&connection_));
+  ON_CALL(encoder_callbacks_, connection())
+      .WillByDefault(testing::Return(OptRef<const Network::Connection>{connection_}));
   ON_CALL(encoder_callbacks_, activeSpan())
       .WillByDefault(testing::ReturnRef(Tracing::NullSpan::instance()));
   encoder_callbacks_.stream_info_.protocol_ = Envoy::Http::Protocol::Http2;
@@ -160,14 +165,18 @@ void UberFilterFuzzer::perFilterSetup() {
       .WillByDefault(testing::Return(resolver_));
 
   // Prepare expectations for TAP config.
-  ON_CALL(factory_context_, admin()).WillByDefault(testing::ReturnRef(factory_context_.admin_));
-  ON_CALL(factory_context_.admin_, addHandler(_, _, _, _, _)).WillByDefault(testing::Return(true));
-  ON_CALL(factory_context_.admin_, removeHandler(_)).WillByDefault(testing::Return(true));
+  ON_CALL(factory_context_.server_factory_context_, admin())
+      .WillByDefault(
+          testing::Return(OptRef<Server::Admin>{factory_context_.server_factory_context_.admin_}));
+  ON_CALL(factory_context_.server_factory_context_.admin_, addHandler(_, _, _, _, _, _))
+      .WillByDefault(testing::Return(true));
+  ON_CALL(factory_context_.server_factory_context_.admin_, removeHandler(_))
+      .WillByDefault(testing::Return(true));
 
   // Prepare expectations for WASM filter.
-  ON_CALL(factory_context_, listenerMetadata())
-      .WillByDefault(testing::ReturnRef(listener_metadata_));
-  ON_CALL(factory_context_.api_, customStatNamespaces())
+  ON_CALL(factory_context_, listenerInfo()).WillByDefault(testing::ReturnRef(listener_info_));
+  ON_CALL(listener_info_, metadata()).WillByDefault(testing::ReturnRef(listener_metadata_));
+  ON_CALL(factory_context_.server_factory_context_.api_, customStatNamespaces())
       .WillByDefault(testing::ReturnRef(custom_stat_namespaces_));
 
   // Prepare expectations for AWSRequestSigning filter
@@ -175,6 +184,28 @@ void UberFilterFuzzer::perFilterSetup() {
       .WillByDefault([this](Buffer::Instance& data, bool) { decoding_buffer_ = &data; });
   ON_CALL(decoder_callbacks_, decodingBuffer()).WillByDefault([this]() -> const Buffer::Instance* {
     return decoding_buffer_;
+  });
+  ON_CALL(encoder_callbacks_, dispatcher()).WillByDefault([this]() -> Event::Dispatcher& {
+    return *worker_thread_dispatcher_;
+  });
+  ON_CALL(decoder_callbacks_, dispatcher()).WillByDefault([this]() -> Event::Dispatcher& {
+    return *worker_thread_dispatcher_;
+  });
+  ON_CALL(encoder_callbacks_, injectEncodedDataToFilterChain(_, true))
+      .WillByDefault([this]() -> void { finishFilter(encoder_filter_.get()); });
+  ON_CALL(encoder_callbacks_, addEncodedData(_, true)).WillByDefault([this]() -> void {
+    finishFilter(encoder_filter_.get());
+  });
+  ON_CALL(encoder_callbacks_, continueEncoding()).WillByDefault([this]() -> void {
+    finishFilter(encoder_filter_.get());
+  });
+  ON_CALL(decoder_callbacks_, injectDecodedDataToFilterChain(_, true))
+      .WillByDefault([this]() -> void { finishFilter(decoder_filter_.get()); });
+  ON_CALL(decoder_callbacks_, addDecodedData(_, true)).WillByDefault([this]() -> void {
+    finishFilter(decoder_filter_.get());
+  });
+  ON_CALL(decoder_callbacks_, continueDecoding()).WillByDefault([this]() -> void {
+    finishFilter(decoder_filter_.get());
   });
 }
 

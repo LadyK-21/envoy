@@ -14,6 +14,8 @@ uint64_t MemoryStatsReader::reservedHeapBytes() { return Memory::Stats::totalCur
 
 uint64_t MemoryStatsReader::unmappedHeapBytes() { return Memory::Stats::totalPageHeapUnmapped(); }
 
+uint64_t MemoryStatsReader::freeMappedHeapBytes() { return Memory::Stats::totalPageHeapFree(); }
+
 FixedHeapMonitor::FixedHeapMonitor(
     const envoy::extensions::resource_monitors::fixed_heap::v3::FixedHeapConfig& config,
     std::unique_ptr<MemoryStatsReader> stats)
@@ -22,10 +24,16 @@ FixedHeapMonitor::FixedHeapMonitor(
 }
 
 void FixedHeapMonitor::updateResourceUsage(Server::ResourceUpdateCallbacks& callbacks) {
-  const size_t physical = stats_->reservedHeapBytes();
-  const size_t unmapped = stats_->unmappedHeapBytes();
-  ASSERT(physical >= unmapped);
-  const size_t used = physical - unmapped;
+
+  auto computeUsedMemory = [this]() -> size_t {
+    const size_t physical = stats_->reservedHeapBytes();
+    const size_t unmapped = stats_->unmappedHeapBytes();
+    const size_t free_mapped = stats_->freeMappedHeapBytes();
+    ASSERT(physical >= (unmapped + free_mapped));
+    return physical - unmapped - free_mapped;
+  };
+
+  const size_t used = computeUsedMemory();
 
   Server::ResourceUsage usage;
   usage.resource_pressure_ = used / static_cast<double>(max_heap_);

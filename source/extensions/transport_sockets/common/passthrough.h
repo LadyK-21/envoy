@@ -5,6 +5,7 @@
 
 #include "source/common/buffer/buffer_impl.h"
 #include "source/common/network/transport_socket_options_impl.h"
+#include "source/common/runtime/runtime_features.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -24,6 +25,21 @@ public:
   absl::string_view defaultServerNameIndication() const override {
     return transport_socket_factory_->defaultServerNameIndication();
   }
+  void hashKey(std::vector<uint8_t>& key,
+               Network::TransportSocketOptionsConstSharedPtr options) const override {
+    return transport_socket_factory_->hashKey(key, options);
+  }
+  Envoy::Ssl::ClientContextSharedPtr sslCtx() override {
+    return transport_socket_factory_->sslCtx();
+  }
+  OptRef<const Ssl::ClientContextConfig> clientContextConfig() const override {
+    return transport_socket_factory_->clientContextConfig();
+  }
+#ifdef ENVOY_ENABLE_QUIC
+  std::shared_ptr<quic::QuicCryptoClientConfig> getCryptoConfig() override {
+    return transport_socket_factory_->getCryptoConfig();
+  }
+#endif
 
 protected:
   // The wrapped factory.

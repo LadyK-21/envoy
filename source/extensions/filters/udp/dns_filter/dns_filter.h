@@ -6,7 +6,7 @@
 #include "envoy/network/filter.h"
 
 #include "source/common/buffer/buffer_impl.h"
-#include "source/common/common/utility.h"
+#include "source/common/common/trie_lookup_table.h"
 #include "source/common/config/config_provider_impl.h"
 #include "source/common/network/utility.h"
 #include "source/extensions/filters/udp/dns_filter/dns_filter_resolver.h"
@@ -50,6 +50,8 @@ namespace DnsFilter {
   COUNTER(downstream_tx_responses)                                                                 \
   COUNTER(query_buffer_underflow)                                                                  \
   COUNTER(query_parsing_failure)                                                                   \
+  COUNTER(queries_with_additional_rrs)                                                             \
+  COUNTER(queries_with_ans_or_authority_rrs)                                                       \
   COUNTER(record_name_overflow)                                                                    \
   HISTOGRAM(downstream_rx_bytes, Bytes)                                                            \
   HISTOGRAM(downstream_rx_query_latency, Milliseconds)                                             \

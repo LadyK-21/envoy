@@ -4,8 +4,8 @@ Rate limit
 ==========
 
 * Global rate limiting :ref:`architecture overview <arch_overview_global_rate_limit>`
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit``.
 * :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.ratelimit.v3.RateLimit>`
-* This filter should be configured with the name *envoy.filters.http.ratelimit*.
 
 The HTTP rate limit filter will call the rate limit service when the request's route or virtual host
 has one or more :ref:`rate limit configurations<envoy_v3_api_field_config.route.v3.VirtualHost.rate_limits>`
@@ -158,7 +158,7 @@ no entry is added.
 Statistics
 ----------
 
-The rate limit filter outputs statistics in the *cluster.<route target cluster>.ratelimit.* namespace.
+The rate limit filter outputs statistics in the ``cluster.<route target cluster>.ratelimit.<optional stat prefix>.`` namespace.
 429 responses or the configured :ref:`rate_limited_status <envoy_v3_api_field_extensions.filters.http.ratelimit.v3.RateLimit.rate_limited_status>` are emitted to the normal cluster :ref:`dynamic HTTP statistics
 <config_cluster_manager_cluster_stats_dynamic_http>`.
 

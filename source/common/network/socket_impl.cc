@@ -23,7 +23,8 @@ SocketImpl::SocketImpl(IoHandlePtr&& io_handle,
                        const Address::InstanceConstSharedPtr& remote_address)
     : io_handle_(std::move(io_handle)),
       connection_info_provider_(
-          std::make_shared<ConnectionInfoSetterImpl>(local_address, remote_address)) {
+          std::make_shared<ConnectionInfoSetterImpl>(local_address, remote_address)),
+      sock_type_(Network::Socket::Type::Stream) {
 
   if (connection_info_provider_->localAddress() != nullptr) {
     addr_type_ = connection_info_provider_->localAddress()->type();
@@ -32,6 +33,12 @@ SocketImpl::SocketImpl(IoHandlePtr&& io_handle,
 
   if (connection_info_provider_->remoteAddress() != nullptr) {
     addr_type_ = connection_info_provider_->remoteAddress()->type();
+    return;
+  }
+
+  if (!io_handle_) {
+    // This can happen iff system socket creation fails.
+    ENVOY_LOG_MISC(warn, "Created socket with null io handle");
     return;
   }
 
@@ -67,9 +74,7 @@ Api::SysCallIntResult SocketImpl::bind(Network::Address::InstanceConstSharedPtr 
     if (pipe->mode() != 0 && !abstract_namespace && bind_result.return_value_ == 0) {
       auto set_permissions = Api::OsSysCallsSingleton::get().chmod(pipe_sa->sun_path, pipe->mode());
       if (set_permissions.return_value_ != 0) {
-        throw EnvoyException(fmt::format("Failed to create socket with mode {}: {}",
-                                         std::to_string(pipe->mode()),
-                                         errorDetails(set_permissions.errno_)));
+        return set_permissions;
       }
     }
     return bind_result;
@@ -77,7 +82,11 @@ Api::SysCallIntResult SocketImpl::bind(Network::Address::InstanceConstSharedPtr 
 
   bind_result = io_handle_->bind(address);
   if (bind_result.return_value_ == 0 && address->ip()->port() == 0) {
-    connection_info_provider_->setLocalAddress(io_handle_->localAddress());
+    auto address_or_error = io_handle_->localAddress();
+    if (!address_or_error.status().ok()) {
+      return Api::SysCallIntResult{-1, HANDLE_ERROR_INVALID};
+    }
+    connection_info_provider_->setLocalAddress(*address_or_error);
   }
   return bind_result;
 }
@@ -87,7 +96,11 @@ Api::SysCallIntResult SocketImpl::listen(int backlog) { return io_handle_->liste
 Api::SysCallIntResult SocketImpl::connect(const Network::Address::InstanceConstSharedPtr address) {
   auto result = io_handle_->connect(address);
   if (address->type() == Address::Type::Ip) {
-    connection_info_provider_->setLocalAddress(io_handle_->localAddress());
+    auto address_or_error = io_handle_->localAddress();
+    if (!address_or_error.status().ok()) {
+      return Api::SysCallIntResult{-1, HANDLE_ERROR_INVALID};
+    }
+    connection_info_provider_->setLocalAddress(*address_or_error);
   }
   return result;
 }

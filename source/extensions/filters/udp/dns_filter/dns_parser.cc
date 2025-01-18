@@ -91,8 +91,13 @@ bool DnsAnswerRecord::serialize(Buffer::OwnedImpl& output) {
       // Store the 128bit address with 2 64 bit writes
       const absl::uint128 addr6 = ip_address->ipv6()->address();
       output.writeBEInt<uint16_t>(sizeof(addr6));
+#ifdef ABSL_IS_BIG_ENDIAN
+      output.writeBEInt<uint64_t>(absl::Uint128High64(addr6));
+      output.writeBEInt<uint64_t>(absl::Uint128Low64(addr6));
+#else
       output.writeLEInt<uint64_t>(absl::Uint128Low64(addr6));
       output.writeLEInt<uint64_t>(absl::Uint128High64(addr6));
+#endif
     } else if (ip_address->ipv4() != nullptr) {
       output.writeBEInt<uint16_t>(4);
       output.writeLEInt<uint32_t>(ip_address->ipv4()->address());
@@ -193,16 +198,15 @@ bool DnsMessageParser::parseDnsObject(DnsQueryContextPtr& context,
     }
   } while (!done);
 
-  // Only QR == 0 and questions without any answer RRs are expected
+  // Only QR == 0 and questions without any answer and authority RRs are expected
   if (!(context->header_.flags.qr == 0 && context->header_.answers == 0 &&
-        context->header_.authority_rrs == 0 && context->header_.additional_rrs == 0)) {
-    ENVOY_LOG(
-        debug,
-        "One or more of Answers [{}], Authority [{}], and Additional [{}] RRs present in the query."
-        "Inverse query is not supported",
-        static_cast<int>(context->header_.answers),
-        static_cast<int>(context->header_.authority_rrs),
-        static_cast<int>(context->header_.additional_rrs));
+        context->header_.authority_rrs == 0)) {
+    ENVOY_LOG(debug,
+              "One or more of Answers [{}], Authority [{}] RRs present in the query. "
+              "Inverse query is not supported",
+              static_cast<int>(context->header_.answers),
+              static_cast<int>(context->header_.authority_rrs));
+    context->counters_.queries_with_ans_or_authority_rrs.inc();
     return false;
   }
 
@@ -213,10 +217,6 @@ bool DnsMessageParser::parseDnsObject(DnsQueryContextPtr& context,
   }
 
   context->id_ = static_cast<uint16_t>(context->header_.id);
-  if (context->id_ == 0) {
-    ENVOY_LOG(debug, "No ID in DNS query");
-    return false;
-  }
 
   // Almost always, we will have only one query here. Per the RFC, QDCOUNT is usually 1
   context->queries_.reserve(context->header_.questions);
@@ -231,6 +231,14 @@ bool DnsMessageParser::parseDnsObject(DnsQueryContextPtr& context,
     }
     context->queries_.push_back(std::move(rec));
   }
+
+  // We could encounter additional RRs in an EDNS query, and Envoy will ignore them.
+  if (context->header_.additional_rrs) {
+    ENVOY_LOG(debug, "Ignoring additional RRs in a query because Envoy does not support. "
+                     "This could be an EDNS query.");
+    context->counters_.queries_with_additional_rrs.inc();
+  }
+
   return true;
 }
 

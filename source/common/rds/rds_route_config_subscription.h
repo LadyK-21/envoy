@@ -43,17 +43,18 @@ struct RdsStats {
 class RdsRouteConfigSubscription : Envoy::Config::SubscriptionCallbacks,
                                    protected Logger::Loggable<Logger::Id::rds> {
 public:
-  RdsRouteConfigSubscription(
-      RouteConfigUpdatePtr&& config_update,
-      std::unique_ptr<Envoy::Config::OpaqueResourceDecoder>&& resource_decoder,
-      const envoy::config::core::v3::ConfigSource& config_source,
-      const std::string& route_config_name, const uint64_t manager_identifier,
-      Server::Configuration::ServerFactoryContext& factory_context, const std::string& stat_prefix,
-      const std::string& rds_type, RouteConfigProviderManager& route_config_provider_manager);
+  RdsRouteConfigSubscription(RouteConfigUpdatePtr&& config_update,
+                             Envoy::Config::OpaqueResourceDecoderSharedPtr&& resource_decoder,
+                             const envoy::config::core::v3::ConfigSource& config_source,
+                             const std::string& route_config_name,
+                             const uint64_t manager_identifier,
+                             Server::Configuration::ServerFactoryContext& factory_context,
+                             const std::string& stat_prefix, const std::string& rds_type,
+                             RouteConfigProviderManager& route_config_provider_manager);
 
   ~RdsRouteConfigSubscription() override;
 
-  absl::optional<RouteConfigProvider*>& routeConfigProvider();
+  RouteConfigProvider*& routeConfigProvider() { return route_config_provider_; }
 
   RouteConfigUpdatePtr& routeConfigUpdate() { return config_update_info_; }
 
@@ -61,20 +62,20 @@ public:
 
 private:
   // Config::SubscriptionCallbacks
-  void onConfigUpdate(const std::vector<Envoy::Config::DecodedResourceRef>& resources,
-                      const std::string& version_info) override;
+  absl::Status onConfigUpdate(const std::vector<Envoy::Config::DecodedResourceRef>& resources,
+                              const std::string& version_info) override;
 
-  void onConfigUpdate(const std::vector<Envoy::Config::DecodedResourceRef>& added_resources,
-                      const Protobuf::RepeatedPtrField<std::string>& removed_resources,
-                      const std::string&) override;
+  absl::Status onConfigUpdate(const std::vector<Envoy::Config::DecodedResourceRef>& added_resources,
+                              const Protobuf::RepeatedPtrField<std::string>& removed_resources,
+                              const std::string&) override;
 
   void onConfigUpdateFailed(Envoy::Config::ConfigUpdateFailureReason reason,
                             const EnvoyException*) override;
 
-  bool validateUpdateSize(int num_resources);
-
-  virtual void beforeProviderUpdate(std::unique_ptr<Init::ManagerImpl>&,
-                                    std::unique_ptr<Cleanup>&) {}
+  virtual absl::Status beforeProviderUpdate(std::unique_ptr<Init::ManagerImpl>&,
+                                            std::unique_ptr<Cleanup>&) {
+    return absl::OkStatus();
+  }
   virtual void afterProviderUpdate() {}
 
 protected:
@@ -97,9 +98,9 @@ protected:
   RdsStats stats_;
   RouteConfigProviderManager& route_config_provider_manager_;
   const uint64_t manager_identifier_;
-  absl::optional<RouteConfigProvider*> route_config_provider_opt_;
+  RouteConfigProvider* route_config_provider_{nullptr};
   RouteConfigUpdatePtr config_update_info_;
-  std::unique_ptr<Envoy::Config::OpaqueResourceDecoder> resource_decoder_;
+  Envoy::Config::OpaqueResourceDecoderSharedPtr resource_decoder_;
 };
 
 using RdsRouteConfigSubscriptionSharedPtr = std::shared_ptr<RdsRouteConfigSubscription>;

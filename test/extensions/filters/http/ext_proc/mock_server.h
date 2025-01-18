@@ -13,9 +13,17 @@ class MockClient : public ExternalProcessorClient {
 public:
   MockClient();
   ~MockClient() override;
+
   MOCK_METHOD(ExternalProcessorStreamPtr, start,
-              (ExternalProcessorCallbacks&, const envoy::config::core::v3::GrpcService&,
-               const StreamInfo::StreamInfo&));
+              (ExternalProcessorCallbacks&, const Grpc::GrpcServiceConfigWithHashKey&,
+               Envoy::Http::AsyncClient::StreamOptions&,
+               Envoy::Http::StreamFilterSidestreamWatermarkCallbacks&));
+  MOCK_METHOD(void, sendRequest,
+              (envoy::service::ext_proc::v3::ProcessingRequest&&, bool, const uint64_t,
+               RequestCallbacks*, StreamBase*));
+  MOCK_METHOD(void, cancel, ());
+
+  MOCK_METHOD(const Envoy::StreamInfo::StreamInfo*, getStreamInfo, (), (const));
 };
 
 class MockStream : public ExternalProcessorStream {
@@ -24,6 +32,9 @@ public:
   ~MockStream() override;
   MOCK_METHOD(void, send, (envoy::service::ext_proc::v3::ProcessingRequest&&, bool));
   MOCK_METHOD(bool, close, ());
+  MOCK_METHOD(const StreamInfo::StreamInfo&, streamInfo, (), (const override));
+  MOCK_METHOD(StreamInfo::StreamInfo&, streamInfo, ());
+  MOCK_METHOD(void, notifyFilterDestroy, ());
 };
 
 } // namespace ExternalProcessing

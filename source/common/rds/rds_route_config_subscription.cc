@@ -8,7 +8,7 @@ namespace Rds {
 
 RdsRouteConfigSubscription::RdsRouteConfigSubscription(
     RouteConfigUpdatePtr&& config_update,
-    std::unique_ptr<Envoy::Config::OpaqueResourceDecoder>&& resource_decoder,
+    Envoy::Config::OpaqueResourceDecoderSharedPtr&& resource_decoder,
     const envoy::config::core::v3::ConfigSource& config_source,
     const std::string& route_config_name, const uint64_t manager_identifier,
     Server::Configuration::ServerFactoryContext& factory_context, const std::string& stat_prefix,
@@ -31,10 +31,11 @@ RdsRouteConfigSubscription::RdsRouteConfigSubscription(
       manager_identifier_(manager_identifier), config_update_info_(std::move(config_update)),
       resource_decoder_(std::move(resource_decoder)) {
   const auto resource_type = route_config_provider_manager_.protoTraits().resourceType();
-  subscription_ =
+  subscription_ = THROW_OR_RETURN_VALUE(
       factory_context.clusterManager().subscriptionFactory().subscriptionFromConfigSource(
           config_source, Envoy::Grpc::Common::typeUrl(resource_type), *scope_, *this,
-          *resource_decoder_, {});
+          resource_decoder_, {}),
+      Envoy::Config::SubscriptionPtr);
   local_init_manager_.add(local_init_target_);
 }
 
@@ -49,27 +50,33 @@ RdsRouteConfigSubscription::~RdsRouteConfigSubscription() {
   route_config_provider_manager_.eraseDynamicProvider(manager_identifier_);
 }
 
-absl::optional<RouteConfigProvider*>& RdsRouteConfigSubscription::routeConfigProvider() {
-  return route_config_provider_opt_;
-}
-
-void RdsRouteConfigSubscription::onConfigUpdate(
+absl::Status RdsRouteConfigSubscription::onConfigUpdate(
     const std::vector<Envoy::Config::DecodedResourceRef>& resources,
     const std::string& version_info) {
-  if (!validateUpdateSize(resources.size())) {
-    return;
+  if (resources.empty()) {
+    ENVOY_LOG(debug, "Missing {} RouteConfiguration for {} in onConfigUpdate()", rds_type_,
+              route_config_name_);
+    stats_.update_empty_.inc();
+    local_init_target_.ready();
+    return absl::OkStatus();
   }
+  if (resources.size() != 1) {
+    return absl::InvalidArgumentError(
+        fmt::format("Unexpected {} resource length: {}", rds_type_, resources.size()));
+  }
+
   const auto& route_config = resources[0].get().resource();
-  if (route_config.GetDescriptor()->full_name() !=
+  Protobuf::ReflectableMessage reflectable_config = createReflectableMessage(route_config);
+  if (reflectable_config->GetDescriptor()->full_name() !=
       route_config_provider_manager_.protoTraits().resourceType()) {
-    throw EnvoyException(fmt::format("Unexpected {} configuration type (expecting {}): {}",
-                                     rds_type_,
-                                     route_config_provider_manager_.protoTraits().resourceType(),
-                                     route_config.GetDescriptor()->full_name()));
+    return absl::InvalidArgumentError(
+        fmt::format("Unexpected {} configuration type (expecting {}): {}", rds_type_,
+                    route_config_provider_manager_.protoTraits().resourceType(),
+                    reflectable_config->GetDescriptor()->full_name()));
   }
   if (resourceName(route_config_provider_manager_.protoTraits(), route_config) !=
       route_config_name_) {
-    throw EnvoyException(
+    return absl::InvalidArgumentError(
         fmt::format("Unexpected {} configuration (expecting {}): {}", rds_type_, route_config_name_,
                     resourceName(route_config_provider_manager_.protoTraits(), route_config)));
   }
@@ -79,34 +86,36 @@ void RdsRouteConfigSubscription::onConfigUpdate(
     stats_.config_reload_.inc();
     stats_.config_reload_time_ms_.set(DateUtil::nowToMilliseconds(factory_context_.timeSource()));
 
-    beforeProviderUpdate(noop_init_manager, resume_rds);
+    RETURN_IF_NOT_OK(beforeProviderUpdate(noop_init_manager, resume_rds));
 
     ENVOY_LOG(debug, "rds: loading new configuration: config_name={} hash={}", route_config_name_,
               config_update_info_->configHash());
 
-    if (route_config_provider_opt_.has_value()) {
-      route_config_provider_opt_.value()->onConfigUpdate();
+    if (route_config_provider_ != nullptr) {
+      RETURN_IF_NOT_OK(route_config_provider_->onConfigUpdate());
     }
 
     afterProviderUpdate();
   }
 
   local_init_target_.ready();
+  return absl::OkStatus();
 }
 
-void RdsRouteConfigSubscription::onConfigUpdate(
+absl::Status RdsRouteConfigSubscription::onConfigUpdate(
     const std::vector<Envoy::Config::DecodedResourceRef>& added_resources,
     const Protobuf::RepeatedPtrField<std::string>& removed_resources, const std::string&) {
   if (!removed_resources.empty()) {
     // TODO(#2500) when on-demand resource loading is supported, an RDS removal may make sense
     // (see discussion in #6879), and so we should do something other than ignoring here.
-    ENVOY_LOG(error,
+    ENVOY_LOG(trace,
               "Server sent a delta {} update attempting to remove a resource (name: {}). Ignoring.",
               rds_type_, removed_resources[0]);
   }
   if (!added_resources.empty()) {
-    onConfigUpdate(added_resources, added_resources[0].get().version());
+    return onConfigUpdate(added_resources, added_resources[0].get().version());
   }
+  return absl::OkStatus();
 }
 
 void RdsRouteConfigSubscription::onConfigUpdateFailed(
@@ -115,22 +124,6 @@ void RdsRouteConfigSubscription::onConfigUpdateFailed(
   // We need to allow server startup to continue, even if we have a bad
   // config.
   local_init_target_.ready();
-}
-
-bool RdsRouteConfigSubscription::validateUpdateSize(int num_resources) {
-  if (num_resources == 0) {
-    ENVOY_LOG(debug, "Missing {} RouteConfiguration for {} in onConfigUpdate()", rds_type_,
-              route_config_name_);
-    stats_.update_empty_.inc();
-    local_init_target_.ready();
-    return false;
-  }
-  if (num_resources != 1) {
-    throw EnvoyException(
-        fmt::format("Unexpected {} resource length: {}", rds_type_, num_resources));
-    // (would be a return false here)
-  }
-  return true;
 }
 
 } // namespace Rds

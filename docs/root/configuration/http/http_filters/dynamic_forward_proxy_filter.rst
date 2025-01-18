@@ -4,8 +4,8 @@ Dynamic forward proxy
 =====================
 
 * HTTP dynamic forward proxy :ref:`architecture overview <arch_overview_http_dynamic_forward_proxy>`
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig``.
 * :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig>`
-* This filter should be configured with the name *envoy.filters.http.dynamic_forward_proxy*
 
 The following is a complete configuration that configures both the
 :ref:`dynamic forward proxy HTTP filter
@@ -58,7 +58,7 @@ To use :ref:`AppleDnsResolverConfig<envoy_v3_api_msg_extensions.network.dns_reso
 Statistics
 ----------
 
-The dynamic forward proxy DNS cache outputs statistics in the dns_cache.<dns_cache_name>.*
+The dynamic forward proxy DNS cache outputs statistics in the ``dns_cache.<dns_cache_name>.``
 namespace.
 
 .. csv-table::
@@ -75,7 +75,7 @@ namespace.
   num_hosts, Gauge, Number of hosts that are currently in the cache.
   dns_rq_pending_overflow, Counter, Number of dns pending request overflow.
 
-The dynamic forward proxy DNS cache circuit breakers outputs statistics in the dns_cache.<dns_cache_name>.circuit_breakers*
+The dynamic forward proxy DNS cache circuit breakers outputs statistics in the ``dns_cache.<dns_cache_name>.circuit_breakers``
 namespace.
 
 .. csv-table::

@@ -1,11 +1,16 @@
 #include <algorithm>
 #include <memory>
 
+#include "source/common/network/transport_socket_options_impl.h"
 #include "source/common/quic/envoy_quic_proof_verifier.h"
-#include "source/extensions/transport_sockets/tls/context_config_impl.h"
+#include "source/common/tls/client_context_impl.h"
+#include "source/common/tls/context_config_impl.h"
 
+#include "test/common/config/dummy_config.pb.h"
 #include "test/common/quic/test_utils.h"
+#include "test/common/tls/cert_validator/timed_cert_validator.h"
 #include "test/mocks/event/mocks.h"
+#include "test/mocks/server/server_factory_context.h"
 #include "test/mocks/ssl/mocks.h"
 #include "test/mocks/stats/mocks.h"
 #include "test/test_common/test_time.h"
@@ -23,11 +28,16 @@ using testing::ReturnRef;
 namespace Envoy {
 namespace Quic {
 
+class MockProofVerifierCallback : public quic::ProofVerifierCallback {
+public:
+  MOCK_METHOD(void, Run, (bool, const std::string&, std::unique_ptr<quic::ProofVerifyDetails>*));
+};
+
 class EnvoyQuicProofVerifierTest : public testing::Test {
 public:
   EnvoyQuicProofVerifierTest()
       : root_ca_cert_(cert_chain_.substr(cert_chain_.rfind("-----BEGIN CERTIFICATE-----"))),
-        leaf_cert_([=]() {
+        leaf_cert_([this]() {
           std::stringstream pem_stream(cert_chain_);
           std::vector<std::string> chain = quic::CertificateView::LoadPemFromStream(&pem_stream);
           return chain[0];
@@ -40,7 +50,7 @@ public:
             ReturnRef(Extensions::TransportSockets::Tls::ClientContextConfigImpl::DEFAULT_CURVES));
     ON_CALL(client_context_config_, alpnProtocols()).WillByDefault(ReturnRef(alpn_));
     ON_CALL(client_context_config_, serverNameIndication()).WillByDefault(ReturnRef(empty_string_));
-    ON_CALL(client_context_config_, signingAlgorithmsForTest()).WillByDefault(ReturnRef(sig_algs_));
+    ON_CALL(client_context_config_, signatureAlgorithms()).WillByDefault(ReturnRef(sig_algs_));
     ON_CALL(client_context_config_, certificateValidationContext())
         .WillByDefault(Return(&cert_validation_ctx_config_));
     ON_CALL(verify_context_, dispatcher()).WillByDefault(ReturnRef(dispatcher_));
@@ -71,9 +81,11 @@ public:
         .WillRepeatedly(ReturnRef(empty_string_list_));
     EXPECT_CALL(cert_validation_ctx_config_, customValidatorConfig())
         .WillRepeatedly(ReturnRef(custom_validator_config_));
-    auto context = std::make_shared<Extensions::TransportSockets::Tls::ClientContextImpl>(
-        store_, client_context_config_, time_system_);
-    verifier_ = std::make_unique<EnvoyQuicProofVerifier>(std::move(context));
+    EXPECT_CALL(cert_validation_ctx_config_, autoSniSanMatch()).WillRepeatedly(Return(false));
+    auto context_or_error = Extensions::TransportSockets::Tls::ClientContextImpl::create(
+        *store_.rootScope(), client_context_config_, factory_context_);
+    THROW_IF_NOT_OK(context_or_error.status());
+    verifier_ = std::make_unique<EnvoyQuicProofVerifier>(std::move(*context_or_error));
   }
 
 protected:
@@ -87,10 +99,10 @@ protected:
   const std::string cert_chain_{quic::test::kTestCertificateChainPem};
   std::string root_ca_cert_;
   const std::string leaf_cert_;
-  const absl::optional<envoy::config::core::v3::TypedExtensionConfig> custom_validator_config_{
+  absl::optional<envoy::config::core::v3::TypedExtensionConfig> custom_validator_config_{
       absl::nullopt};
   NiceMock<Stats::MockStore> store_;
-  Event::GlobalTimeSystem time_system_;
+  Server::Configuration::MockServerFactoryContext factory_context_;
   NiceMock<Ssl::MockClientContextConfig> client_context_config_;
   Ssl::MockCertificateValidationContextConfig cert_validation_ctx_config_;
   std::unique_ptr<EnvoyQuicProofVerifier> verifier_;
@@ -119,6 +131,42 @@ TEST_F(EnvoyQuicProofVerifierTest, VerifyCertChainSuccess) {
   EXPECT_TRUE(cloned->isValid());
 }
 
+TEST_F(EnvoyQuicProofVerifierTest, AsyncVerifyCertChainSuccess) {
+  custom_validator_config_ = envoy::config::core::v3::TypedExtensionConfig();
+  TestUtility::loadFromYaml(TestEnvironment::substitute(R"EOF(
+name: "envoy.tls.cert_validator.timed_cert_validator"
+typed_config:
+  "@type": type.googleapis.com/test.common.config.DummyConfig
+  )EOF"),
+                            custom_validator_config_.value());
+
+  configCertVerificationDetails(true);
+  std::unique_ptr<quic::CertificateView> cert_view =
+      quic::CertificateView::ParseSingleCertificate(leaf_cert_);
+  const std::string ocsp_response;
+  const std::string cert_sct;
+  std::string error_details;
+  std::unique_ptr<quic::ProofVerifyDetails> verify_details;
+  auto* quic_verify_callback = new MockProofVerifierCallback();
+  Event::MockTimer* verify_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
+  EXPECT_EQ(quic::QUIC_PENDING,
+            verifier_->VerifyCertChain(
+                std::string(cert_view->subject_alt_name_domains()[0]), 54321, {leaf_cert_},
+                ocsp_response, cert_sct, &verify_context_, &error_details, &verify_details, nullptr,
+                std::unique_ptr<MockProofVerifierCallback>(quic_verify_callback)));
+  EXPECT_EQ(verify_details, nullptr);
+  EXPECT_TRUE(verify_timer->enabled());
+
+  EXPECT_CALL(*quic_verify_callback, Run(true, _, _))
+      .WillOnce(Invoke(
+          [](bool, const std::string&, std::unique_ptr<quic::ProofVerifyDetails>* verify_details) {
+            EXPECT_NE(verify_details, nullptr);
+            auto details = std::unique_ptr<quic::ProofVerifyDetails>((*verify_details)->Clone());
+            EXPECT_TRUE(static_cast<CertVerifyResult&>(*details).isValid());
+          }));
+  verify_timer->invokeCallback();
+}
+
 TEST_F(EnvoyQuicProofVerifierTest, VerifyCertChainFailureFromSsl) {
   configCertVerificationDetails(false);
   std::unique_ptr<quic::CertificateView> cert_view =
@@ -132,7 +180,8 @@ TEST_F(EnvoyQuicProofVerifierTest, VerifyCertChainFailureFromSsl) {
                                        {leaf_cert_}, ocsp_response, cert_sct, &verify_context_,
                                        &error_details, &verify_details, nullptr, nullptr))
       << error_details;
-  EXPECT_EQ("X509_verify_cert: certificate verification error at depth 1: certificate has expired",
+  EXPECT_EQ("verify cert failed: X509_verify_cert: certificate verification error at depth 1: "
+            "certificate has expired",
             error_details);
   EXPECT_NE(verify_details, nullptr);
   EXPECT_FALSE(static_cast<CertVerifyResult&>(*verify_details).isValid());
@@ -188,6 +237,41 @@ TEST_F(EnvoyQuicProofVerifierTest, VerifyCertChainFailureInvalidHost) {
                                        nullptr))
       << error_details;
   EXPECT_EQ("Leaf certificate doesn't match hostname: unknown.org", error_details);
+}
+
+TEST_F(EnvoyQuicProofVerifierTest, AsyncVerifyCertChainFailureInvalidHost) {
+  custom_validator_config_ = envoy::config::core::v3::TypedExtensionConfig();
+  TestUtility::loadFromYaml(TestEnvironment::substitute(R"EOF(
+name: "envoy.tls.cert_validator.timed_cert_validator"
+typed_config:
+  "@type": type.googleapis.com/test.common.config.DummyConfig
+  )EOF"),
+                            custom_validator_config_.value());
+
+  configCertVerificationDetails(true);
+  const std::string ocsp_response;
+  const std::string cert_sct;
+  std::string error_details;
+  std::unique_ptr<quic::ProofVerifyDetails> verify_details;
+  auto* quic_verify_callback = new MockProofVerifierCallback();
+  Event::MockTimer* verify_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
+  EXPECT_EQ(
+      quic::QUIC_PENDING,
+      verifier_->VerifyCertChain("unknown.org", 54321, {leaf_cert_}, ocsp_response, cert_sct,
+                                 &verify_context_, &error_details, &verify_details, nullptr,
+                                 std::unique_ptr<MockProofVerifierCallback>(quic_verify_callback)));
+  EXPECT_EQ(verify_details, nullptr);
+  EXPECT_TRUE(verify_timer->enabled());
+
+  EXPECT_CALL(*quic_verify_callback,
+              Run(false, "Leaf certificate doesn't match hostname: unknown.org", _))
+      .WillOnce(Invoke(
+          [](bool, const std::string&, std::unique_ptr<quic::ProofVerifyDetails>* verify_details) {
+            EXPECT_NE(verify_details, nullptr);
+            auto details = std::unique_ptr<quic::ProofVerifyDetails>((*verify_details)->Clone());
+            EXPECT_FALSE(static_cast<CertVerifyResult&>(*details).isValid());
+          }));
+  verify_timer->invokeCallback();
 }
 
 TEST_F(EnvoyQuicProofVerifierTest, VerifyCertChainFailureUnsupportedECKey) {
@@ -293,9 +377,81 @@ ZCFbredVxDBZuoVsfrKPSQa407Jj1Q==
             verifier_->VerifyCertChain("lyft.com", 54321, chain, ocsp_response, cert_sct,
                                        &verify_context_, &error_details, &verify_details, nullptr,
                                        nullptr));
-  EXPECT_EQ("X509_verify_cert: certificate verification error at depth 0: unsupported certificate "
+  EXPECT_EQ("verify cert failed: X509_verify_cert: certificate verification error at depth 0: "
+            "unsupported certificate "
             "purpose",
             error_details);
+}
+
+TEST_F(EnvoyQuicProofVerifierTest, VerifySubjectAltNameListOverrideFailure) {
+  // NOLINTNEXTLINE(modernize-make-shared)
+  transport_socket_options_.reset(new Network::TransportSocketOptionsImpl("", {"non-example.com"}));
+  configCertVerificationDetails(true);
+  std::unique_ptr<quic::CertificateView> cert_view =
+      quic::CertificateView::ParseSingleCertificate(leaf_cert_);
+  const std::string ocsp_response;
+  const std::string cert_sct;
+  std::string error_details;
+  std::unique_ptr<quic::ProofVerifyDetails> verify_details;
+  EXPECT_EQ(quic::QUIC_FAILURE,
+            verifier_->VerifyCertChain(std::string(cert_view->subject_alt_name_domains()[0]), 54321,
+                                       {leaf_cert_}, ocsp_response, cert_sct, &verify_context_,
+                                       &error_details, &verify_details, nullptr, nullptr))
+      << error_details;
+  EXPECT_EQ("verify cert failed: verify SAN list", error_details);
+  EXPECT_NE(verify_details, nullptr);
+  EXPECT_FALSE(static_cast<CertVerifyResult&>(*verify_details).isValid());
+}
+
+TEST_F(EnvoyQuicProofVerifierTest, VerifyX509v1Cert) {
+  std::string cert_v1 = R"text(
+-----BEGIN CERTIFICATE-----
+MIICpDCCAYwCCQClUY4hwG3eCTANBgkqhkiG9w0BAQsFADAUMRIwEAYDVQQDDAlx
+dWljLnRlc3QwHhcNMjQwMTMxMDUxNDI1WhcNMjUwMTMwMDUxNDI1WjAUMRIwEAYD
+VQQDDAlxdWljLnRlc3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCw
+PmbxO63dR1i7yCADA0Q2N6vWzkZ53lsKktSNeAoV5RM6hbH9zt5BR6blZSJ87Ybl
+otMUioTb3DIF2z99k/QB8xpXevurZ09z9bMricsIM2LiS1hNyF09h1yPnRCy3BB5
+wEwbovKqDaFbCe09iefvsxGMENyDLA+uoisgxgRGfNJwggGy5WTSvpmnn1iEDmHR
+4kEOxlDVHhmWIvr3nGFNuO/YEgPcDVdhu+UVCHan2RDjGX7KfkfNvt6aTLIgq+rO
+CnF5/hFYRO4ypn2Lsw1me1n3H3hEm/5MuY7XdTK8tl/ezaIEHjUt5ExnKy0N2AS9
+LcMpoD4L0DFunxMdH72HAgMBAAEwDQYJKoZIhvcNAQELBQADggEBADNHjJNzozcS
+APuVQCQnrdw7Drou3AyO47F2kxzheh8iqDU77MaH8aWhwmcpdg1vxhTCGkPRNKD8
+7XUpkh7kdpvfzQex12c3DDnVvgsa26aEXsbyxtV3ty+tiIRzRGAEEH4j5n0322Vd
+kcd96WKVplBaYncSiSFCyomAymd+eqhBsVEXDGcf+YtEq8TwGZJ3o0RNm7AfDTu6
+vuvcjdfSQSjwxshGMLq/70K+lYoKKVw6/AaxypJ/YYIHSUtNzu85bO9yW7lG2kov
+Ti7PYy9cxmZTjNqHI7Kghk3FLry/6P2bbclZxdtzJAPzZ9nw6N9xGfj2D8+3VALl
+wYsML58R3P8=
+-----END CERTIFICATE-----
+)text";
+
+  // NOLINTNEXTLINE(modernize-make-shared)
+  transport_socket_options_.reset(new Network::TransportSocketOptionsImpl("", {"non-example.com"}));
+  configCertVerificationDetails(true);
+  const std::string ocsp_response;
+  const std::string cert_sct;
+  std::string error_details;
+  std::unique_ptr<quic::ProofVerifyDetails> verify_details;
+  std::stringstream pem_stream(cert_v1);
+  std::vector<std::string> chain = quic::CertificateView::LoadPemFromStream(&pem_stream);
+  EXPECT_EQ(quic::QUIC_FAILURE,
+            verifier_->VerifyCertChain("localhost", 54321, chain, ocsp_response, cert_sct,
+                                       &verify_context_, &error_details, &verify_details, nullptr,
+                                       nullptr))
+      << error_details;
+  EXPECT_EQ("unable to parse certificate", error_details);
+  EXPECT_EQ(verify_details, nullptr);
+}
+
+TEST_F(EnvoyQuicProofVerifierTest, VerifyProof) {
+  configCertVerificationDetails(true);
+  EXPECT_DEATH(verifier_->VerifyProof("", 0, "", quic::QUIC_VERSION_IETF_RFC_V1, "", {}, "", "",
+                                      nullptr, nullptr, nullptr, {}),
+               "not implemented");
+}
+
+TEST_F(EnvoyQuicProofVerifierTest, CreateDefaultContext) {
+  configCertVerificationDetails(true);
+  EXPECT_EQ(nullptr, verifier_->CreateDefaultContext());
 }
 
 } // namespace Quic

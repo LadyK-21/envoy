@@ -22,26 +22,29 @@ class LogsHandler : public HandlerContextBase, Logger::Loggable<Logger::Id::admi
 public:
   LogsHandler(Server::Instance& server);
 
-  Http::Code handlerLogging(absl::string_view path_and_query,
-                            Http::ResponseHeaderMap& response_headers, Buffer::Instance& response,
+  Http::Code handlerLogging(Http::ResponseHeaderMap& response_headers, Buffer::Instance& response,
                             AdminStream&);
 
-  Http::Code handlerReopenLogs(absl::string_view path_and_query,
-                               Http::ResponseHeaderMap& response_headers,
+  Http::Code handlerReopenLogs(Http::ResponseHeaderMap& response_headers,
                                Buffer::Instance& response, AdminStream&);
+
+  /**
+   * Returns the valid logging levels as an array of string views.
+   */
+  static std::vector<absl::string_view> levelStrings();
 
 private:
   /**
    * Attempt to change the log level of a logger or all loggers.
    *
-   * Returns StatusCode::kInvalidArgument if validation failed.
+   * @return OkStatus if there are no non-empty params, StatusCode::kInvalidArgument if
+   * validation failed.
    *
-   * @param params supplies the incoming endpoint query params.
+   * @param params supplies the incoming endpoint query or post params.
    */
-  absl::Status changeLogLevel(const Http::Utility::QueryParams& params);
-  void changeAllLogLevels(spdlog::level::level_enum level);
-  absl::Status
-  changeLogLevels(const absl::flat_hash_map<absl::string_view, spdlog::level::level_enum>& changes);
+  absl::Status changeLogLevel(Http::Utility::QueryParamsMulti& params);
+  absl::Status changeLogLevelsForComponentLoggers(
+      const absl::flat_hash_map<absl::string_view, spdlog::level::level_enum>& changes);
 
   inline absl::StatusOr<spdlog::level::level_enum> parseLogLevel(absl::string_view level_string) {
     auto level_it = log_levels_.find(level_string);
@@ -52,7 +55,8 @@ private:
   }
 
   // Maps level string to level enum.
-  const absl::flat_hash_map<absl::string_view, spdlog::level::level_enum> log_levels_;
+  using StringViewLevelMap = absl::flat_hash_map<absl::string_view, spdlog::level::level_enum>;
+  const StringViewLevelMap log_levels_;
 };
 
 } // namespace Server

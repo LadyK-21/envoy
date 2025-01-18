@@ -1,6 +1,5 @@
 #include <chrono>
-#include <cstddef>
-#include <memory>
+#include <type_traits>
 
 #include "envoy/tcp/conn_pool.h"
 
@@ -39,7 +38,9 @@ namespace Router {
 
 class SipRouterTest : public testing::Test {
 public:
-  SipRouterTest() = default;
+  SipRouterTest()
+      : router_filter_config_(std::make_shared<NiceMock<MockRouterFilterConfig>>()),
+        router_stats_(RouterFilterConfigImpl::generateStats("test", *store_.rootScope())){};
   ~SipRouterTest() override { delete (filter_); }
 
   void initializeTrans(const std::string& sip_protocol_options_yaml = "",
@@ -72,7 +73,6 @@ public:
                  envoy_grpc:
                    cluster_name: tra_service
                timeout: 2s
-               transport_api_version: V3
 )EOF";
       TestUtility::loadFromYaml(sip_proxy_yaml1, sip_proxy_config_);
     } else {
@@ -98,20 +98,24 @@ public:
     }
 
     const auto options = std::make_shared<ProtocolOptionsConfigImpl>(sip_protocol_options_config_);
-    EXPECT_CALL(*context_.cluster_manager_.thread_local_cluster_.cluster_.info_,
-                extensionProtocolOptions(_))
+    EXPECT_CALL(
+        *context_.server_factory_context_.cluster_manager_.thread_local_cluster_.cluster_.info_,
+        extensionProtocolOptions(_))
         .WillRepeatedly(Return(options));
 
     EXPECT_CALL(context_, getTransportSocketFactoryContext())
         .WillRepeatedly(testing::ReturnRef(factory_context_));
-    EXPECT_CALL(factory_context_, localInfo()).WillRepeatedly(testing::ReturnRef(local_info_));
+    EXPECT_CALL(factory_context_.server_context_, localInfo())
+        .WillRepeatedly(testing::ReturnRef(local_info_));
 
     transaction_infos_ = std::make_shared<TransactionInfos>();
-    context_.cluster_manager_.initializeThreadLocalClusters({cluster_name_});
+    context_.server_factory_context_.cluster_manager_.initializeThreadLocalClusters(
+        {cluster_name_});
 
-    StreamInfo::StreamInfoImpl stream_info{time_source_, nullptr};
-    SipFilterStats stat = SipFilterStats::generateStats("test.", store_);
-    EXPECT_CALL(config_, stats()).WillRepeatedly(ReturnRef(stat));
+    StreamInfo::StreamInfoImpl stream_info{time_source_, nullptr,
+                                           StreamInfo::FilterState::LifeSpan::Connection};
+    SipFilterStats stat = SipFilterStats::generateStats("test.", *store_.rootScope());
+    EXPECT_CALL(*config_, stats()).WillRepeatedly(ReturnRef(stat));
 
     filter_ =
         new NiceMock<MockConnectionManager>(config_, random_, time_source_, context_, nullptr);
@@ -127,8 +131,9 @@ public:
     route_ = new NiceMock<MockRoute>();
     route_ptr_.reset(route_);
 
-    router_ =
-        std::make_unique<Router>(context_.clusterManager(), "test", context_.scope(), context_);
+    EXPECT_CALL(*router_filter_config_, stats()).WillRepeatedly(ReturnRef(router_stats_));
+    router_ = std::make_unique<Router>(router_filter_config_,
+                                       context_.server_factory_context_.clusterManager(), context_);
 
     EXPECT_EQ(nullptr, router_->downstreamConnection());
 
@@ -136,19 +141,6 @@ public:
     EXPECT_CALL(callbacks_, transactionInfos()).WillOnce(Return(transaction_infos_));
     EXPECT_CALL(callbacks_, traHandler()).WillRepeatedly(Return(tra_handler_));
     router_->setDecoderFilterCallbacks(callbacks_);
-  }
-
-  void initializeRouterWithCallback() {
-    route_ = new NiceMock<MockRoute>();
-    route_ptr_.reset(route_);
-
-    router_ =
-        std::make_unique<Router>(context_.clusterManager(), "test", context_.scope(), context_);
-
-    EXPECT_CALL(callbacks_, transactionInfos()).WillOnce(Return(transaction_infos_));
-    router_->setDecoderFilterCallbacks(callbacks_);
-
-    EXPECT_EQ(nullptr, router_->downstreamConnection());
   }
 
   void initializeMetadata(MsgType msg_type, MethodType method = MethodType::Invite,
@@ -165,7 +157,7 @@ public:
         "Route: "
         "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
         "sip:scscf-internal.cncs.svc.cluster.local:5060;ep=10.0.0.1>");
-    metadata_->parseHeader(HeaderType::Route);
+    metadata_->addMsgHeader(HeaderType::From, "User.0001@10.0.0.1:5060");
     metadata_->resetAffinityIteration();
     if (set_destination) {
       metadata_->setDestination("10.0.0.1");
@@ -189,18 +181,21 @@ public:
   }
 
   void connectUpstream() {
-    EXPECT_CALL(*context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.connection_data_,
+    EXPECT_CALL(*context_.server_factory_context_.cluster_manager_.thread_local_cluster_
+                     .tcp_conn_pool_.connection_data_,
                 addUpstreamCallbacks(_))
         .WillOnce(Invoke([&](Tcp::ConnectionPool::UpstreamCallbacks& cb) -> void {
           upstream_callbacks_ = &cb;
         }));
 
     conn_state_.reset();
-    EXPECT_CALL(*context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.connection_data_,
+    EXPECT_CALL(*context_.server_factory_context_.cluster_manager_.thread_local_cluster_
+                     .tcp_conn_pool_.connection_data_,
                 connectionState())
         .WillRepeatedly(
             Invoke([&]() -> Tcp::ConnectionPool::ConnectionState* { return conn_state_.get(); }));
-    context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.poolReady(upstream_connection_);
+    context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+        .poolReady(upstream_connection_);
 
     EXPECT_NE(nullptr, upstream_callbacks_);
   }
@@ -228,6 +223,7 @@ public:
         "SIP/2.0 200 OK\x0d\x0a"
         "Call-ID: 1-3193@11.0.0.10\x0d\x0a"
         "CSeq: 1 INVITE\x0d\x0a"
+        "From: <sip:User.0001@tas01.defult.svc.cluster.local>;tag=1\x0d\x0a"
         "Contact: <sip:User.0001@11.0.0.10:15060;transport=TCP>\x0d\x0a"
         "Record-Route: <sip:+16959000000:15306;role=anch;lr;transport=udp>\x0d\x0a"
         "Route: <sip:+16959000000:15306;role=anch;lr;transport=udp>\x0d\x0a"
@@ -243,10 +239,10 @@ public:
 
     initializeMetadata(msg_type, MethodType::Ok200, false);
 
-    EXPECT_CALL(*tra_handler_, retrieveTrafficRoutingAssistant(_, _, _, _))
+    EXPECT_CALL(*tra_handler_, retrieveTrafficRoutingAssistant(_, _, _, _, _))
         .WillRepeatedly(
-            Invoke([&](const std::string&, const std::string&, SipFilters::DecoderFilterCallbacks&,
-                       std::string& host) -> QueryStatus {
+            Invoke([&](const std::string&, const std::string&, const absl::optional<TraContextMap>,
+                       SipFilters::DecoderFilterCallbacks&, std::string& host) -> QueryStatus {
               host = "10.0.0.11";
               return QueryStatus::Pending;
             }));
@@ -336,9 +332,12 @@ public:
   Buffer::OwnedImpl buffer_;
   NiceMock<ThreadLocal::MockInstance> thread_local_;
   NiceMock<MockConnectionManager>* filter_{};
-  NiceMock<MockConfig> config_;
+  std::shared_ptr<NiceMock<MockConfig>> config_{std::make_shared<NiceMock<MockConfig>>()};
   NiceMock<Random::MockRandomGenerator> random_;
   Stats::TestUtil::TestStore store_;
+
+  std::shared_ptr<NiceMock<MockRouterFilterConfig>> router_filter_config_;
+  RouterStats router_stats_;
 
   std::shared_ptr<TransactionInfos> transaction_infos_;
   std::shared_ptr<SipSettings> sip_settings_;
@@ -409,12 +408,13 @@ TEST_F(SipRouterTest, NoTcpConnPool) {
   initializeRouter();
   initializeTransaction();
   initializeMetadata(MsgType::Request);
-  EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_, tcpConnPool(_, _))
+  EXPECT_CALL(context_.server_factory_context_.cluster_manager_.thread_local_cluster_,
+              tcpConnPool(_, _))
       .WillOnce(Return(absl::nullopt));
   try {
     startRequest(FilterStatus::Continue);
   } catch (const AppException& ex) {
-    EXPECT_EQ(1U, context_.scope().counterFromString("test.no_healthy_upstream").value());
+    EXPECT_EQ(1U, store_.counterFromString("test.no_healthy_upstream").value());
   }
 }
 
@@ -427,16 +427,16 @@ TEST_F(SipRouterTest, NoTcpConnPoolEmptyDest) {
                           "Route: "
                           "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;"
                           "x-suri=sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
   metadata_->affinity().emplace_back("Route", "ep", "ep", false, false);
   metadata_->resetAffinityIteration();
 
-  EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_, tcpConnPool(_, _))
+  EXPECT_CALL(context_.server_factory_context_.cluster_manager_.thread_local_cluster_,
+              tcpConnPool(_, _))
       .WillOnce(Return(absl::nullopt));
   try {
     startRequest(FilterStatus::Continue);
   } catch (const AppException& ex) {
-    EXPECT_EQ(1U, context_.scope().counterFromString("test.no_healthy_upstream").value());
+    EXPECT_EQ(1U, store_.counterFromString("test.no_healthy_upstream").value());
   }
 }
 
@@ -449,13 +449,12 @@ TEST_F(SipRouterTest, QueryPending) {
                           "Route: "
                           "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;"
                           "x-suri=sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
   metadata_->affinity().emplace_back("Route", "lskpmc", "S1F1", false, false);
   metadata_->resetAffinityIteration();
-  EXPECT_CALL(*tra_handler_, retrieveTrafficRoutingAssistant(_, _, _, _))
+  EXPECT_CALL(*tra_handler_, retrieveTrafficRoutingAssistant(_, _, _, _, _))
       .WillRepeatedly(
-          Invoke([&](const std::string&, const std::string&, SipFilters::DecoderFilterCallbacks&,
-                     std::string& host) -> QueryStatus {
+          Invoke([&](const std::string&, const std::string&, const absl::optional<TraContextMap>,
+                     SipFilters::DecoderFilterCallbacks&, std::string& host) -> QueryStatus {
             host = "10.0.0.11";
             return QueryStatus::Pending;
           }));
@@ -466,15 +465,15 @@ TEST_F(SipRouterTest, QueryStop) {
   initializeTrans();
   initializeRouter();
   initializeTransaction();
-  initializeMetadata(MsgType::Request);
+  initializeMetadata(MsgType::Request, MethodType::Invite, false);
   metadata_->affinity().clear();
   metadata_->affinity().emplace_back("Route", "lskpmc", "S1F1", false, false);
   metadata_->resetAffinityIteration();
-  EXPECT_CALL(*tra_handler_, retrieveTrafficRoutingAssistant(_, _, _, _))
+  EXPECT_CALL(*tra_handler_, retrieveTrafficRoutingAssistant(_, _, _, _, _))
       .WillRepeatedly(
-          Invoke([&](const std::string&, const std::string&, SipFilters::DecoderFilterCallbacks&,
-                     std::string& host) -> QueryStatus {
-            host = "10.0.0.11";
+          Invoke([&](const std::string&, const std::string&, const absl::optional<TraContextMap>,
+                     SipFilters::DecoderFilterCallbacks&, std::string& host) -> QueryStatus {
+            host = "";
             return QueryStatus::Stop;
           }));
   startRequest(FilterStatus::Continue);
@@ -501,7 +500,7 @@ TEST_F(SipRouterTest, CallNoRoute) {
   try {
     EXPECT_EQ(FilterStatus::StopIteration, router_->transportBegin(metadata_));
   } catch (const AppException& ex) {
-    EXPECT_EQ(1U, context_.scope().counterFromString("test.route_missing").value());
+    EXPECT_EQ(1U, store_.counterFromString("test.route_missing").value());
   }
 
   destroyRouterOutofRange();
@@ -517,13 +516,14 @@ TEST_F(SipRouterTest, CallNoCluster) {
   EXPECT_CALL(callbacks_, route()).WillOnce(Return(route_ptr_));
   EXPECT_CALL(*route_, routeEntry()).WillOnce(Return(&route_entry_));
   EXPECT_CALL(route_entry_, clusterName()).WillRepeatedly(ReturnRef(cluster_name_));
-  EXPECT_CALL(context_.cluster_manager_, getThreadLocalCluster(Eq(cluster_name_)))
+  EXPECT_CALL(context_.server_factory_context_.cluster_manager_,
+              getThreadLocalCluster(Eq(cluster_name_)))
       .WillOnce(Return(nullptr));
 
   try {
     EXPECT_EQ(FilterStatus::StopIteration, router_->transportBegin(metadata_));
   } catch (const AppException& ex) {
-    EXPECT_EQ(1U, context_.scope().counterFromString("test.unknown_cluster").value());
+    EXPECT_EQ(1U, store_.counterFromString("test.unknown_cluster").value());
   }
 
   destroyRouter();
@@ -538,13 +538,15 @@ TEST_F(SipRouterTest, ClusterMaintenanceMode) {
   EXPECT_CALL(callbacks_, route()).WillOnce(Return(route_ptr_));
   EXPECT_CALL(*route_, routeEntry()).WillOnce(Return(&route_entry_));
   EXPECT_CALL(route_entry_, clusterName()).WillRepeatedly(ReturnRef(cluster_name_));
-  EXPECT_CALL(*context_.cluster_manager_.thread_local_cluster_.cluster_.info_, maintenanceMode())
+  EXPECT_CALL(
+      *context_.server_factory_context_.cluster_manager_.thread_local_cluster_.cluster_.info_,
+      maintenanceMode())
       .WillOnce(Return(true));
 
   try {
     EXPECT_EQ(FilterStatus::StopIteration, router_->transportBegin(metadata_));
   } catch (const AppException& ex) {
-    EXPECT_EQ(1U, context_.scope().counterFromString("test.upstream_rq_maintenance_mode").value());
+    EXPECT_EQ(1U, store_.counterFromString("test.upstream_rq_maintenance_mode").value());
   }
   destroyRouter();
 }
@@ -560,7 +562,9 @@ TEST_F(SipRouterTest, NoHost) {
   EXPECT_CALL(route_entry_, clusterName()).WillOnce(ReturnRef(cluster_name_));
   EXPECT_EQ(FilterStatus::Continue, router_->transportBegin(metadata_));
 
-  EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_, host())
+  EXPECT_CALL(
+      context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_,
+      host())
       .WillOnce(Return(nullptr));
   EXPECT_EQ(FilterStatus::Continue, router_->messageBegin(metadata_));
   destroyRouter();
@@ -570,7 +574,7 @@ TEST_F(SipRouterTest, DestNotEqualToHost) {
   initializeTrans();
   initializeRouter();
   initializeTransaction();
-  initializeMetadata(MsgType::Request);
+  initializeMetadata(MsgType::Request, MethodType::Invite, false);
 
   EXPECT_CALL(callbacks_, route()).WillOnce(Return(route_ptr_));
   EXPECT_CALL(*route_, routeEntry()).WillOnce(Return(&route_entry_));
@@ -583,7 +587,6 @@ TEST_F(SipRouterTest, DestNotEqualToHost) {
       "Route: "
       "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
       "sip:scscf-internal.cncs.svc.cluster.local:5060;ep=192.168.0.1>");
-  metadata_->parseHeader(HeaderType::Route);
 
   metadata_->resetAffinityIteration();
 
@@ -612,12 +615,15 @@ TEST_F(SipRouterTest, CallWithExistingConnection) {
   metadata_->affinity().emplace_back("Route", "ep", "ep", false, false);
   metadata_->resetAffinityIteration();
 
-  EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_, newConnection(_))
+  EXPECT_CALL(
+      context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_,
+      newConnection(_))
       .WillOnce(
           Invoke([&](Tcp::ConnectionPool::Callbacks& cb) -> Tcp::ConnectionPool::Cancellable* {
-            context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.newConnectionImpl(cb);
-            context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.poolReady(
-                upstream_connection_);
+            context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+                .newConnectionImpl(cb);
+            context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+                .poolReady(upstream_connection_);
             return nullptr;
           }));
   EXPECT_EQ(FilterStatus::Continue, router_->messageBegin(metadata_));
@@ -645,12 +651,15 @@ TEST_F(SipRouterTest, CallWithExistingConnectionDefaultLoadBalance) {
   // initializeMetadata(MsgType::Request);
   metadata_->resetDestination();
 
-  EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_, newConnection(_))
+  EXPECT_CALL(
+      context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_,
+      newConnection(_))
       .WillOnce(
           Invoke([&](Tcp::ConnectionPool::Callbacks& cb) -> Tcp::ConnectionPool::Cancellable* {
-            context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.newConnectionImpl(cb);
-            context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.poolReady(
-                upstream_connection_);
+            context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+                .newConnectionImpl(cb);
+            context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+                .poolReady(upstream_connection_);
             return nullptr;
           }));
   EXPECT_EQ(FilterStatus::Continue, router_->messageBegin(metadata_));
@@ -659,36 +668,39 @@ TEST_F(SipRouterTest, CallWithExistingConnectionDefaultLoadBalance) {
 
 TEST_F(SipRouterTest, PoolFailure) {
   initializeTrans();
-  initializeRouterWithCallback();
+  initializeRouter();
   initializeTransaction();
   initializeMetadata(MsgType::Response);
   startRequest();
-  context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.poolFailure(
-      ConnectionPool::PoolFailureReason::RemoteConnectionFailure);
+  context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+      .poolFailure(ConnectionPool::PoolFailureReason::RemoteConnectionFailure);
 }
 
 TEST_F(SipRouterTest, NextAffinityAfterPoolFailure) {
   initializeTrans();
-  initializeRouterWithCallback();
+  initializeRouter();
   initializeTransaction();
   initializeMetadata(MsgType::Response);
   startRequest();
   metadata_->affinity().emplace_back("Route", "ep", "ep", false, false);
   metadata_->resetAffinityIteration();
-  context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.poolFailure(
-      ConnectionPool::PoolFailureReason::RemoteConnectionFailure);
+  context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+      .poolFailure(ConnectionPool::PoolFailureReason::RemoteConnectionFailure);
 }
 
 TEST_F(SipRouterTest, NewConnectionFailure) {
   initializeTrans();
-  initializeRouterWithCallback();
+  initializeRouter();
   initializeTransaction();
-  EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_, newConnection(_))
+  EXPECT_CALL(
+      context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_,
+      newConnection(_))
       .WillOnce(
           Invoke([&](Tcp::ConnectionPool::Callbacks& cb) -> Tcp::ConnectionPool::Cancellable* {
-            context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.newConnectionImpl(cb);
-            context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_.poolReady(
-                upstream_connection_);
+            context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+                .newConnectionImpl(cb);
+            context_.server_factory_context_.cluster_manager_.thread_local_cluster_.tcp_conn_pool_
+                .poolReady(upstream_connection_);
             return nullptr;
           }));
   initializeMetadata(MsgType::Response);
@@ -745,7 +757,6 @@ TEST_F(SipRouterTest, RouteMatch) {
       "Route: "
       "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
       "sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
 
   EXPECT_NE(nullptr, matcher_ptr->route(*metadata_));
 }
@@ -774,7 +785,6 @@ TEST_F(SipRouterTest, RouteEmptyDomain) {
       "Route: "
       "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
       "sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
 
   EXPECT_EQ(nullptr, matcher_ptr->route(*metadata_));
 }
@@ -803,7 +813,6 @@ TEST_F(SipRouterTest, RouteDefaultDomain) {
       "Route: "
       "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
       "sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
 
   EXPECT_EQ(nullptr, matcher_ptr->route(*metadata_));
 }
@@ -832,7 +841,6 @@ TEST_F(SipRouterTest, RouteEmptyHeader) {
       "Route: "
       "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
       "sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
 
   EXPECT_NE(nullptr, matcher_ptr->route(*metadata_));
 }
@@ -859,7 +867,6 @@ TEST_F(SipRouterTest, RouteNoRouteHeaderUsingTopLine) {
   metadata_->addMsgHeader(HeaderType::TopLine,
                           "INVITE sip:User.0000@scscf-internal.cncs.svc.cluster.local;ep=127.0.0.1 "
                           "SIP/2.0\x0d\x0a");
-  metadata_->parseHeader(HeaderType::TopLine);
 
   EXPECT_NE(nullptr, matcher_ptr->route(*metadata_));
 }
@@ -931,7 +938,6 @@ TEST_F(SipRouterTest, RouteHeaderHostDomain) {
       "Route: "
       "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
       "sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
 
   EXPECT_NE(nullptr, matcher_ptr->route(*metadata_));
 }
@@ -960,7 +966,6 @@ TEST_F(SipRouterTest, RouteHeaderWildcardDomain) {
       "Route: "
       "<sip:test@pcsf-cfed.cncs.svc.cluster.local;role=anch;lr;transport=udp;x-suri="
       "sip:scscf-internal.cncs.svc.cluster.local:5060>");
-  metadata_->parseHeader(HeaderType::Route);
 
   EXPECT_NE(nullptr, matcher_ptr->route(*metadata_));
 }

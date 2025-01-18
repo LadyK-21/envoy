@@ -20,6 +20,23 @@
 namespace Envoy {
 namespace Network {
 
+/**
+ * All DNS stats. @see stats_macros.h
+ */
+#define ALL_CARES_DNS_RESOLVER_STATS(COUNTER, GAUGE)                                               \
+  COUNTER(resolve_total)                                                                           \
+  GAUGE(pending_resolutions, NeverImport)                                                          \
+  COUNTER(not_found)                                                                               \
+  COUNTER(get_addr_failure)                                                                        \
+  COUNTER(timeouts)
+
+/**
+ * Struct definition for all DNS stats. @see stats_macros.h
+ */
+struct CaresDnsResolverStats {
+  ALL_CARES_DNS_RESOLVER_STATS(GENERATE_COUNTER_STRUCT, GENERATE_GAUGE_STRUCT)
+};
+
 class DnsResolverImplPeer;
 
 /**
@@ -28,11 +45,16 @@ class DnsResolverImplPeer;
  */
 class DnsResolverImpl : public DnsResolver, protected Logger::Loggable<Logger::Id::dns> {
 public:
+  static absl::StatusOr<absl::optional<std::string>>
+  maybeBuildResolversCsv(const std::vector<Network::Address::InstanceConstSharedPtr>& resolvers);
+
   DnsResolverImpl(
       const envoy::extensions::network::dns_resolver::cares::v3::CaresDnsResolverConfig& config,
-      Event::Dispatcher& dispatcher,
-      const std::vector<Network::Address::InstanceConstSharedPtr>& resolvers);
+      Event::Dispatcher& dispatcher, absl::optional<std::string> resolvers_csv,
+      Stats::Scope& root_scope);
   ~DnsResolverImpl() override;
+
+  static CaresDnsResolverStats generateCaresDnsResolverStats(Stats::Scope& scope);
 
   // Network::DnsResolver
   ActiveDnsQuery* resolve(const std::string& dns_name, DnsLookupFamily dns_lookup_family,
@@ -46,6 +68,7 @@ private:
   friend class DnsResolverImplPeer;
   class PendingResolution : public ActiveDnsQuery {
   public:
+    // Network::ActiveDnsQuery
     void cancel(CancelReason reason) override {
       // c-ares only supports channel-wide cancellation, so we just allow the
       // network events to continue but don't invoke the callback on completion.
@@ -53,6 +76,9 @@ private:
       cancelled_ = true;
       cancel_reason_ = reason;
     }
+    void addTrace(uint8_t) override {}
+    std::string getTraces() override { return {}; }
+
     // Does the object own itself? Resource reclamation occurs via self-deleting
     // on query completion or error.
     bool owned_ = false;
@@ -84,12 +110,13 @@ private:
     struct PendingResponse {
       ResolutionStatus status_;
       std::list<DnsResponse> address_list_;
+      std::string details_{"not_set"};
     };
 
     // Note: pending_response_ is constructed with ResolutionStatus::Failure by default and
-    // __only__ changed to ResolutionStatus::Success if there is an ARES_SUCCESS reply.
-    // In the dual_resolution case __any__ ARES_SUCCESS reply will result in a
-    // ResolutionStatus::Success callback.
+    // __only__ changed to ResolutionStatus::Completed if there is an `ARES_SUCCESS`
+    // or `ARES_ENODATA` or `ARES_ENOTFOUND`reply. In the dual_resolution case __any__ ARES_SUCCESS
+    // reply will result in a ResolutionStatus::Completed callback.
     PendingResponse pending_response_{ResolutionStatus::Failure, {}};
   };
 
@@ -140,16 +167,12 @@ private:
     const DnsLookupFamily dns_lookup_family_;
     // Queried for at construction time.
     const AvailableInterfaces available_interfaces_;
-    const bool accept_nodata_;
   };
 
   struct AresOptions {
     ares_options options_;
     int optmask_;
   };
-
-  static absl::optional<std::string>
-  maybeBuildResolversCsv(const std::vector<Network::Address::InstanceConstSharedPtr>& resolvers);
 
   // Callback for events on sockets tracked in events_.
   void onEventCallback(os_fd_t fd, uint32_t events);
@@ -165,6 +188,8 @@ private:
   // Return default AresOptions.
   AresOptions defaultAresOptions();
 
+  void chargeGetAddrInfoErrorStats(int status, int timeouts);
+
   Event::Dispatcher& dispatcher_;
   Event::TimerPtr timer_;
   ares_channel channel_;
@@ -173,8 +198,14 @@ private:
 
   absl::node_hash_map<int, Event::FileEventPtr> events_;
   const bool use_resolvers_as_fallback_;
+  const uint32_t udp_max_queries_;
+  const uint64_t query_timeout_seconds_;
+  const uint32_t query_tries_;
+  const bool rotate_nameservers_;
   const absl::optional<std::string> resolvers_csv_;
   const bool filter_unroutable_families_;
+  Stats::ScopeSharedPtr scope_;
+  CaresDnsResolverStats stats_;
 };
 
 DECLARE_FACTORY(CaresDnsResolverFactory);

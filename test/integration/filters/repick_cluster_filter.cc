@@ -21,7 +21,7 @@ class RepickClusterFilter : public Http::PassThroughFilter {
 public:
   Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& request_header, bool) override {
     request_header.addCopy(Envoy::Http::LowerCaseString(ClusterHeaderName), ClusterName);
-    decoder_callbacks_->clearRouteCache();
+    decoder_callbacks_->downstreamCallbacks()->clearRouteCache();
     return Http::FilterHeadersStatus::Continue;
   }
 };
@@ -30,8 +30,8 @@ class RepickClusterFilterConfig : public Extensions::HttpFilters::Common::EmptyH
 public:
   RepickClusterFilterConfig() : EmptyHttpFilterConfig("repick-cluster-filter") {}
 
-  Http::FilterFactoryCb createFilter(const std::string&,
-                                     Server::Configuration::FactoryContext&) override {
+  absl::StatusOr<Http::FilterFactoryCb>
+  createFilter(const std::string&, Server::Configuration::FactoryContext&) override {
     return [](Http::FilterChainFactoryCallbacks& callbacks) -> void {
       callbacks.addStreamFilter(
           std::make_shared<::Envoy::RepickClusterFilter::RepickClusterFilter>());

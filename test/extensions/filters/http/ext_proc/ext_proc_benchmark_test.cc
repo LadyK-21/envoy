@@ -100,7 +100,7 @@ protected:
       envoy::config::listener::v3::Filter ext_proc_filter;
       ext_proc_filter.set_name("envoy.filters.http.ext_proc");
       ext_proc_filter.mutable_typed_config()->PackFrom(proto_config_);
-      config_helper_.prependFilter(MessageUtil::getJsonStringFromMessageOrDie(ext_proc_filter));
+      config_helper_.prependFilter(MessageUtil::getJsonStringFromMessageOrError(ext_proc_filter));
     });
 
     setUpstreamProtocol(Http::CodecType::HTTP2);
@@ -182,7 +182,7 @@ TEST_F(BenchmarkTest, AddRequestHeaderAndClose) {
                             ->mutable_header_mutation()
                             ->add_set_headers();
         new_hdr->mutable_header()->set_key("x-envoy-benchmark");
-        new_hdr->mutable_header()->set_value("true");
+        new_hdr->mutable_header()->set_raw_value("true");
         stream->Write(header_resp);
       });
   initialize();
@@ -210,7 +210,7 @@ TEST_F(BenchmarkTest, AddResponseHeaderAndClose) {
                             ->add_set_headers()
                             ->mutable_header();
         new_hdr->set_key("x-envoy-benchmark");
-        new_hdr->set_value("true");
+        new_hdr->set_raw_value("true");
         stream->Write(response_out);
       });
   initialize();

@@ -1,21 +1,18 @@
-#include "span_context_extractor.h"
+#include "source/extensions/tracers/opentelemetry/span_context_extractor.h"
 
-#include "envoy/tracing/http_tracer.h"
+#include "envoy/tracing/tracer.h"
 
 #include "source/common/http/header_map_impl.h"
+#include "source/common/tracing/trace_context_impl.h"
+#include "source/extensions/tracers/opentelemetry/span_context.h"
 
 #include "absl/strings/escaping.h"
-#include "span_context.h"
 
 namespace Envoy {
 namespace Extensions {
 namespace Tracers {
 namespace OpenTelemetry {
 namespace {
-
-const Http::LowerCaseString& openTelemetryPropagationHeader() {
-  CONSTRUCT_ON_FIRST_USE(Http::LowerCaseString, "traceparent");
-}
 
 // See https://www.w3.org/TR/trace-context/#traceparent-header
 constexpr int kTraceparentHeaderSize = 55; // 2 + 1 + 32 + 1 + 16 + 1 + 2
@@ -41,12 +38,12 @@ SpanContextExtractor::SpanContextExtractor(Tracing::TraceContext& trace_context)
 SpanContextExtractor::~SpanContextExtractor() = default;
 
 bool SpanContextExtractor::propagationHeaderPresent() {
-  auto propagation_header = trace_context_.getByKey(openTelemetryPropagationHeader());
+  auto propagation_header = OpenTelemetryConstants::get().TRACE_PARENT.get(trace_context_);
   return propagation_header.has_value();
 }
 
 absl::StatusOr<SpanContext> SpanContextExtractor::extractSpanContext() {
-  auto propagation_header = trace_context_.getByKey(openTelemetryPropagationHeader());
+  auto propagation_header = OpenTelemetryConstants::get().TRACE_PARENT.get(trace_context_);
   if (!propagation_header.has_value()) {
     // We should have already caught this, but just in case.
     return absl::InvalidArgumentError("No propagation header found");
@@ -87,7 +84,25 @@ absl::StatusOr<SpanContext> SpanContextExtractor::extractSpanContext() {
   // See https://w3c.github.io/trace-context/#trace-flags.
   char decoded_trace_flags = absl::HexStringToBytes(trace_flags).front();
   bool sampled = (decoded_trace_flags & 1);
-  SpanContext span_context(version, trace_id, parent_id, sampled);
+
+  // If a tracestate header is received without an accompanying traceparent header,
+  // it is invalid and MUST be discarded. Because we're already checking for the
+  // traceparent header above, we don't need to check here.
+  // See https://www.w3.org/TR/trace-context/#processing-model-for-working-with-trace-context
+  absl::string_view tracestate_key = OpenTelemetryConstants::get().TRACE_STATE.key();
+  std::vector<std::string> tracestate_values;
+  // Multiple tracestate header fields MUST be handled as specified by RFC7230 Section 3.2.2 Field
+  // Order.
+  trace_context_.forEach(
+      [&tracestate_key, &tracestate_values](absl::string_view key, absl::string_view value) {
+        if (key == tracestate_key) {
+          tracestate_values.push_back(std::string{value});
+        }
+        return true;
+      });
+  std::string tracestate = absl::StrJoin(tracestate_values, ",");
+
+  SpanContext span_context(version, trace_id, parent_id, sampled, tracestate);
   return span_context;
 }
 

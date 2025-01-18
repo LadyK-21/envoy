@@ -72,7 +72,7 @@ public:
   MOCK_METHOD(Network::Listener*, listener, ());
   MOCK_METHOD(void, pauseListening, ());
   MOCK_METHOD(void, resumeListening, ());
-  MOCK_METHOD(void, shutdownListener, ());
+  MOCK_METHOD(void, shutdownListener, (const Network::ExtraShutdownListenerOptions&));
   MOCK_METHOD(void, updateListenerConfig, (Network::ListenerConfig&));
   MOCK_METHOD(void, onFilterChainDraining, (const std::list<const Network::FilterChain*>&));
   MOCK_METHOD(void, onAccept, (Network::ConnectionSocketPtr &&));
@@ -90,7 +90,8 @@ TEST_F(ClientConnectionFactoryTest,
       tls_slot_.get();
   auto client_conn = dispatcher_->createClientConnection(
       std::make_shared<Network::Address::EnvoyInternalInstance>(listener_addr),
-      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr);
+      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr,
+      nullptr);
   EXPECT_NE(nullptr, client_conn);
   EXPECT_TRUE(client_conn->connecting());
   client_conn->connect();
@@ -103,7 +104,8 @@ TEST_F(ClientConnectionFactoryTest, ConnectFailsIfInternalConnectionManagerNotEx
   setupTlsSlot();
   auto client_conn = dispatcher_->createClientConnection(
       std::make_shared<Network::Address::EnvoyInternalInstance>(listener_addr),
-      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr);
+      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr,
+      nullptr);
   EXPECT_NE(nullptr, client_conn);
   EXPECT_TRUE(client_conn->connecting());
   client_conn->connect();
@@ -121,7 +123,8 @@ TEST_F(ClientConnectionFactoryTest, ConnectFailsIfInternalListenerNotExist) {
 
   auto client_conn = dispatcher_->createClientConnection(
       std::make_shared<Network::Address::EnvoyInternalInstance>(listener_addr),
-      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr);
+      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr,
+      nullptr);
 
   EXPECT_NE(nullptr, client_conn);
   EXPECT_TRUE(client_conn->connecting());
@@ -148,7 +151,8 @@ TEST_F(ClientConnectionFactoryTest, ConnectSucceeds) {
 
   auto client_conn = dispatcher_->createClientConnection(
       std::make_shared<Network::Address::EnvoyInternalInstance>(listener_addr),
-      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr);
+      Network::Address::InstanceConstSharedPtr(), Network::Test::createRawBufferSocket(), nullptr,
+      nullptr);
 
   EXPECT_NE(nullptr, server_socket);
 

@@ -31,29 +31,29 @@ namespace SipProxy {
 
 class SipTraTest : public testing::Test {
 public:
-  SipTraTest() : stream_info_(time_source_, nullptr) {}
+  SipTraTest()
+      : stream_info_(time_source_, nullptr, StreamInfo::FilterState::LifeSpan::FilterChain) {}
   std::shared_ptr<SipProxy::MockTrafficRoutingAssistantHandlerDeep> initTraHandler() {
     std::string tra_yaml = R"EOF(
                grpc_service:
                  envoy_grpc:
                    cluster_name: tra_service
                timeout: 2s
-               transport_api_version: V3
 )EOF";
 
     auto tra_config = std::make_shared<
         envoy::extensions::filters::network::sip_proxy::tra::v3alpha::TraServiceConfig>();
     TestUtility::loadFromYaml(tra_yaml, *tra_config);
 
-    SipFilterStats stat = SipFilterStats::generateStats("test.", store_);
+    SipFilterStats stat = SipFilterStats::generateStats("test.", *store_.rootScope());
     auto config = std::make_shared<NiceMock<MockConfig>>();
     EXPECT_CALL(*config, stats()).WillRepeatedly(ReturnRef(stat));
     auto context = std::make_shared<NiceMock<Server::Configuration::MockFactoryContext>>();
-    auto filter = std::make_shared<NiceMock<MockConnectionManager>>(*config, random_, time_source_,
-                                                                    *context, nullptr);
+    filter_ = std::make_shared<NiceMock<MockConnectionManager>>(config, random_, time_source_,
+                                                                *context, nullptr);
 
     auto tra_handler = std::make_shared<NiceMock<SipProxy::MockTrafficRoutingAssistantHandlerDeep>>(
-        *filter, dispatcher_, *tra_config, *context, stream_info_);
+        *filter_, dispatcher_, *tra_config, *context, stream_info_);
 
     auto async_client = std::make_shared<testing::NiceMock<Grpc::MockAsyncClient>>();
 
@@ -78,21 +78,30 @@ public:
   StreamInfo::StreamInfoImpl stream_info_;
   std::unique_ptr<testing::NiceMock<Grpc::MockAsyncStream>> async_stream_;
   TrafficRoutingAssistant::ClientPtr tra_client_;
+  std::shared_ptr<ConnectionManager> filter_;
 };
 
 TEST_F(SipTraTest, TraUpdate) {
   auto tra_handler = initTraHandler();
-  tra_handler->updateTrafficRoutingAssistant("lskpmc", "S2F1", "10.0.0.1");
+  tra_handler->updateTrafficRoutingAssistant("lskpmc", "S2F1", "10.0.0.1", absl::nullopt);
+}
+
+TEST_F(SipTraTest, TraUpdateWithSIPContext) {
+  auto tra_handler = initTraHandler();
+  MessageMetadataSharedPtr metadata = std::make_shared<MessageMetadata>("");
+  metadata->setMethodType(MethodType::Register);
+  metadata->addMsgHeader(HeaderType::From, "user@sip.com");
+  tra_handler->updateTrafficRoutingAssistant("lskpmc", "S2F1", "10.0.0.1", metadata->traContext());
 }
 
 TEST_F(SipTraTest, TraRetrieveContinue) {
   auto tra_handler = initTraHandler();
-  tra_handler->updateTrafficRoutingAssistant("lskpmc", "S1F1", "10.0.0.1");
+  tra_handler->updateTrafficRoutingAssistant("lskpmc", "S1F1", "10.0.0.1", absl::nullopt);
 
   NiceMock<SipFilters::MockDecoderFilterCallbacks> callbacks;
   std::string host = "";
-  EXPECT_EQ(QueryStatus::Continue,
-            tra_handler->retrieveTrafficRoutingAssistant("lskpmc", "S1F1", callbacks, host));
+  EXPECT_EQ(QueryStatus::Continue, tra_handler->retrieveTrafficRoutingAssistant(
+                                       "lskpmc", "S1F1", absl::nullopt, callbacks, host));
   EXPECT_EQ(host, "10.0.0.1");
 }
 
@@ -101,12 +110,14 @@ TEST_F(SipTraTest, TraRetrievePending) {
   NiceMock<SipFilters::MockDecoderFilterCallbacks> callbacks;
 
   MessageMetadataSharedPtr metadata = std::make_shared<MessageMetadata>("");
+  metadata->setMethodType(MethodType::Register);
+  metadata->addMsgHeader(HeaderType::From, "user@sip.com");
   metadata->affinity().emplace_back("Route", "lskpmc", "", true, true);
   metadata->resetAffinityIteration();
   EXPECT_CALL(callbacks, metadata()).WillRepeatedly(Return(metadata));
   std::string host = "";
-  EXPECT_EQ(QueryStatus::Pending,
-            tra_handler->retrieveTrafficRoutingAssistant("lskpmc", "S1F1", callbacks, host));
+  EXPECT_EQ(QueryStatus::Pending, tra_handler->retrieveTrafficRoutingAssistant(
+                                      "lskpmc", "S1F1", metadata->traContext(), callbacks, host));
   EXPECT_EQ(host, "");
 }
 
@@ -115,12 +126,14 @@ TEST_F(SipTraTest, TraRetrieveStop) {
   NiceMock<SipFilters::MockDecoderFilterCallbacks> callbacks;
 
   MessageMetadataSharedPtr metadata = std::make_shared<MessageMetadata>("");
+  metadata->setMethodType(MethodType::Register);
+  metadata->addMsgHeader(HeaderType::From, "user@sip.com");
   metadata->affinity().emplace_back("Route", "lskpmc", "", false, true);
   metadata->resetAffinityIteration();
   EXPECT_CALL(callbacks, metadata()).WillRepeatedly(Return(metadata));
   std::string host = "10.0.0.1";
-  EXPECT_EQ(QueryStatus::Stop,
-            tra_handler->retrieveTrafficRoutingAssistant("lskpmc", "S1F1", callbacks, host));
+  EXPECT_EQ(QueryStatus::Stop, tra_handler->retrieveTrafficRoutingAssistant(
+                                   "lskpmc", "S1F1", metadata->traContext(), callbacks, host));
 }
 
 TEST_F(SipTraTest, TraCompleteUpdateRsp) {
@@ -182,7 +195,15 @@ TEST_F(SipTraTest, TraDoSubscribe) {
 
 TEST_F(SipTraTest, TraDelete) {
   auto tra_handler = initTraHandler();
-  tra_handler->deleteTrafficRoutingAssistant("lskpmc", "S1F1");
+  tra_handler->deleteTrafficRoutingAssistant("lskpmc", "S1F1", absl::nullopt);
+}
+
+TEST_F(SipTraTest, TraDeleteWithSIPContext) {
+  auto tra_handler = initTraHandler();
+  MessageMetadataSharedPtr metadata = std::make_shared<MessageMetadata>("");
+  metadata->setMethodType(MethodType::Bye);
+  metadata->addMsgHeader(HeaderType::From, "user@sip.com");
+  tra_handler->deleteTrafficRoutingAssistant("lskpmc", "S1F1", metadata->traContext());
 }
 
 TEST_F(SipTraTest, TraSubscribe) {
@@ -332,7 +353,7 @@ TEST_F(SipTraTest, Misc) {
 
   absl::flat_hash_map<std::string, std::string> data;
   data.emplace(std::make_pair("S1F1", "10.0.0.1"));
-  grpc_client.createTrafficRoutingAssistant("lskpmc", data, span_, stream_info_);
+  grpc_client.createTrafficRoutingAssistant("lskpmc", data, absl::nullopt, span_, stream_info_);
 
   Http::TestRequestHeaderMapImpl request_headers;
   request_cb->onCreateInitialMetadata(request_headers);
@@ -354,6 +375,19 @@ TEST_F(SipTraTest, Misc) {
   stream_cb->onReceiveTrailingMetadata(std::move(response_trailers));
   stream_cb->onReceiveMessageRaw(std::make_unique<Buffer::OwnedImpl>(""));
   stream_cb->onRemoteClose(status, "");
+}
+
+TEST_F(SipTraTest, TraGetTraContextFromMetadata) {
+  MessageMetadataSharedPtr metadata = std::make_shared<MessageMetadata>("");
+  metadata->setMethodType(MethodType::Register);
+  metadata->addMsgHeader(HeaderType::From, "user@sip.com");
+
+  auto context = metadata->traContext();
+  EXPECT_EQ(context["from_header"], "user@sip.com");
+  EXPECT_EQ(context["method_type"], "REGISTER");
+
+  auto context2 = metadata->traContext();
+  EXPECT_EQ(context2, context);
 }
 
 } // namespace SipProxy

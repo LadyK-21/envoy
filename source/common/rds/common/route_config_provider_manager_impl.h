@@ -36,7 +36,7 @@ template <class Rds, class RouteConfiguration, int NameFieldNumber, class Config
 class RouteConfigProviderManagerImpl : public RouteConfigProviderManager<Rds, RouteConfiguration>,
                                        public Singleton::Instance {
 public:
-  RouteConfigProviderManagerImpl(Server::Admin& admin)
+  RouteConfigProviderManagerImpl(OptRef<Server::Admin> admin)
       : manager_(admin, absl::AsciiStrToLower(getRdsName()) + "_routes", proto_traits_) {}
 
   // RouteConfigProviderManager
@@ -49,7 +49,7 @@ public:
           auto config_update = std::make_unique<RouteConfigUpdateReceiverImpl>(
               config_traits_, proto_traits_, factory_context);
           auto resource_decoder =
-              std::make_unique<Envoy::Config::OpaqueResourceDecoderImpl<RouteConfiguration>>(
+              std::make_shared<Envoy::Config::OpaqueResourceDecoderImpl<RouteConfiguration>>(
                   factory_context.messageValidationContext().dynamicValidationVisitor(),
                   getNameFieldName());
           auto subscription = std::make_shared<RdsRouteConfigSubscription>(
@@ -77,11 +77,12 @@ private:
   ConfigTraitsImpl<RouteConfiguration, ConfigImpl, NullConfigImpl> config_traits_;
   ProtoTraitsImpl<RouteConfiguration, 1> proto_traits_;
 
-  std::string getRdsName() { return Rds().GetDescriptor()->name(); }
+  std::string getRdsName() { return std::string(Rds().GetDescriptor()->name()); }
 
   std::string getNameFieldName() {
     ASSERT(RouteConfiguration().GetDescriptor()->FindFieldByNumber(NameFieldNumber));
-    return RouteConfiguration().GetDescriptor()->FindFieldByNumber(NameFieldNumber)->name();
+    return std::string(
+        RouteConfiguration().GetDescriptor()->FindFieldByNumber(NameFieldNumber)->name());
   }
 };
 

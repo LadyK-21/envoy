@@ -21,26 +21,38 @@ class AsyncFileContextThreadPool final : public AsyncFileContextBase {
 public:
   explicit AsyncFileContextThreadPool(AsyncFileManager& manager, int fd);
 
-  absl::StatusOr<std::function<void()>>
-  createHardLink(absl::string_view filename,
-                 std::function<void(absl::Status)> on_complete) override;
-  absl::Status close(std::function<void(absl::Status)> on_complete) override;
-  absl::StatusOr<std::function<void()>>
-  read(off_t offset, size_t length,
-       std::function<void(absl::StatusOr<Buffer::InstancePtr>)> on_complete) override;
-  absl::StatusOr<std::function<void()>>
-  write(Buffer::Instance& contents, off_t offset,
-        std::function<void(absl::StatusOr<size_t>)> on_complete) override;
-  absl::StatusOr<std::function<void()>>
-  duplicate(std::function<void(absl::StatusOr<AsyncFileHandle>)> on_complete) override;
+  // CancelFunction should not be called during or after the callback.
+  // CancelFunction should only be called from the same thread that created
+  // the context.
+  // The callback will be dispatched to the same thread that created the context.
+  absl::StatusOr<CancelFunction>
+  stat(Event::Dispatcher* dispatcher,
+       absl::AnyInvocable<void(absl::StatusOr<struct stat>)> on_complete) override;
+  absl::StatusOr<CancelFunction>
+  createHardLink(Event::Dispatcher* dispatcher, absl::string_view filename,
+                 absl::AnyInvocable<void(absl::Status)> on_complete) override;
+  absl::StatusOr<CancelFunction> close(Event::Dispatcher* dispatcher,
+                                       absl::AnyInvocable<void(absl::Status)> on_complete) override;
+  absl::StatusOr<CancelFunction>
+  read(Event::Dispatcher* dispatcher, off_t offset, size_t length,
+       absl::AnyInvocable<void(absl::StatusOr<Buffer::InstancePtr>)> on_complete) override;
+  absl::StatusOr<CancelFunction>
+  write(Event::Dispatcher* dispatcher, Buffer::Instance& contents, off_t offset,
+        absl::AnyInvocable<void(absl::StatusOr<size_t>)> on_complete) override;
+  absl::StatusOr<CancelFunction>
+  duplicate(Event::Dispatcher* dispatcher,
+            absl::AnyInvocable<void(absl::StatusOr<AsyncFileHandle>)> on_complete) override;
+  absl::StatusOr<CancelFunction>
+  truncate(Event::Dispatcher* dispatcher, size_t length,
+           absl::AnyInvocable<void(absl::Status)> on_complete) override;
 
   int& fileDescriptor() { return file_descriptor_; }
 
   ~AsyncFileContextThreadPool() override;
 
 protected:
-  absl::StatusOr<std::function<void()>>
-  checkFileAndEnqueue(std::shared_ptr<AsyncFileAction> action);
+  absl::StatusOr<CancelFunction> checkFileAndEnqueue(Event::Dispatcher* dispatcher,
+                                                     std::unique_ptr<AsyncFileAction> action);
 
   int file_descriptor_;
 };

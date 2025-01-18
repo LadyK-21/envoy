@@ -17,8 +17,9 @@ namespace AsyncFiles {
 
 AsyncFileContextBase::AsyncFileContextBase(AsyncFileManager& manager) : manager_(manager) {}
 
-std::function<void()> AsyncFileContextBase::enqueue(std::shared_ptr<AsyncFileAction> action) {
-  return manager_.enqueue(std::move(action));
+CancelFunction AsyncFileContextBase::enqueue(Event::Dispatcher* dispatcher,
+                                             std::unique_ptr<AsyncFileAction> action) {
+  return manager_.enqueue(dispatcher, std::move(action));
 }
 
 } // namespace AsyncFiles

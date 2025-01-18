@@ -27,70 +27,11 @@ namespace Envoy {
 namespace Extensions {
 namespace NetworkFilters {
 namespace ThriftProxy {
-namespace {
-
-using TransportTypeMap =
-    std::map<envoy::extensions::filters::network::thrift_proxy::v3::TransportType, TransportType>;
-
-static const TransportTypeMap& transportTypeMap() {
-  CONSTRUCT_ON_FIRST_USE(
-      TransportTypeMap,
-      {
-          {envoy::extensions::filters::network::thrift_proxy::v3::AUTO_TRANSPORT,
-           TransportType::Auto},
-          {envoy::extensions::filters::network::thrift_proxy::v3::FRAMED, TransportType::Framed},
-          {envoy::extensions::filters::network::thrift_proxy::v3::UNFRAMED,
-           TransportType::Unframed},
-          {envoy::extensions::filters::network::thrift_proxy::v3::HEADER, TransportType::Header},
-      });
-}
-
-using ProtocolTypeMap =
-    std::map<envoy::extensions::filters::network::thrift_proxy::v3::ProtocolType, ProtocolType>;
-
-static const ProtocolTypeMap& protocolTypeMap() {
-  CONSTRUCT_ON_FIRST_USE(
-      ProtocolTypeMap,
-      {
-          {envoy::extensions::filters::network::thrift_proxy::v3::AUTO_PROTOCOL,
-           ProtocolType::Auto},
-          {envoy::extensions::filters::network::thrift_proxy::v3::BINARY, ProtocolType::Binary},
-          {envoy::extensions::filters::network::thrift_proxy::v3::LAX_BINARY,
-           ProtocolType::LaxBinary},
-          {envoy::extensions::filters::network::thrift_proxy::v3::COMPACT, ProtocolType::Compact},
-          {envoy::extensions::filters::network::thrift_proxy::v3::TWITTER, ProtocolType::Twitter},
-      });
-}
-
-TransportType
-lookupTransport(envoy::extensions::filters::network::thrift_proxy::v3::TransportType transport) {
-  const auto& transport_iter = transportTypeMap().find(transport);
-  if (transport_iter == transportTypeMap().end()) {
-    throw EnvoyException(fmt::format(
-        "unknown transport {}",
-        envoy::extensions::filters::network::thrift_proxy::v3::TransportType_Name(transport)));
-  }
-
-  return transport_iter->second;
-}
-
-ProtocolType
-lookupProtocol(envoy::extensions::filters::network::thrift_proxy::v3::ProtocolType protocol) {
-  const auto& protocol_iter = protocolTypeMap().find(protocol);
-  if (protocol_iter == protocolTypeMap().end()) {
-    throw EnvoyException(fmt::format(
-        "unknown protocol {}",
-        envoy::extensions::filters::network::thrift_proxy::v3::ProtocolType_Name(protocol)));
-  }
-  return protocol_iter->second;
-}
-
-} // namespace
 
 ProtocolOptionsConfigImpl::ProtocolOptionsConfigImpl(
     const envoy::extensions::filters::network::thrift_proxy::v3::ThriftProtocolOptions& config)
-    : transport_(lookupTransport(config.transport())),
-      protocol_(lookupProtocol(config.protocol())) {}
+    : transport_(ProtoUtils::getTransportType(config.transport())),
+      protocol_(ProtoUtils::getProtocolType(config.protocol())) {}
 
 TransportType ProtocolOptionsConfigImpl::transport(TransportType downstream_transport) const {
   return (transport_ == TransportType::Auto) ? downstream_transport : transport_;
@@ -105,10 +46,13 @@ SINGLETON_MANAGER_REGISTRATION(thrift_route_config_provider_manager);
 Network::FilterFactoryCb ThriftProxyFilterConfigFactory::createFilterFactoryFromProtoTyped(
     const envoy::extensions::filters::network::thrift_proxy::v3::ThriftProxy& proto_config,
     Server::Configuration::FactoryContext& context) {
+  auto& server_context = context.serverFactoryContext();
+
   std::shared_ptr<Router::RouteConfigProviderManager> route_config_provider_manager =
-      context.singletonManager().getTyped<Router::RouteConfigProviderManager>(
-          SINGLETON_MANAGER_REGISTERED_NAME(thrift_route_config_provider_manager), [&context] {
-            return std::make_shared<Router::RouteConfigProviderManagerImpl>(context.admin());
+      server_context.singletonManager().getTyped<Router::RouteConfigProviderManager>(
+          SINGLETON_MANAGER_REGISTERED_NAME(thrift_route_config_provider_manager),
+          [&server_context] {
+            return std::make_shared<Router::RouteConfigProviderManagerImpl>(server_context.admin());
           });
 
   std::shared_ptr<Config> filter_config(
@@ -119,8 +63,9 @@ Network::FilterFactoryCb ThriftProxyFilterConfigFactory::createFilterFactoryFrom
   return [route_config_provider_manager, filter_config,
           &context](Network::FilterManager& filter_manager) -> void {
     filter_manager.addReadFilter(std::make_shared<ConnectionManager>(
-        *filter_config, context.api().randomGenerator(),
-        context.mainThreadDispatcher().timeSource(), context.drainDecision()));
+        filter_config, context.serverFactoryContext().api().randomGenerator(),
+        context.serverFactoryContext().mainThreadDispatcher().timeSource(),
+        context.drainDecision()));
   };
 }
 
@@ -136,7 +81,8 @@ ConfigImpl::ConfigImpl(
     Router::RouteConfigProviderManager& route_config_provider_manager)
     : context_(context), stats_prefix_(fmt::format("thrift.{}.", config.stat_prefix())),
       stats_(ThriftFilterStats::generateStats(stats_prefix_, context_.scope())),
-      transport_(lookupTransport(config.transport())), proto_(lookupProtocol(config.protocol())),
+      transport_(ProtoUtils::getTransportType(config.transport())),
+      proto_(ProtoUtils::getProtocolType(config.protocol())),
       payload_passthrough_(config.payload_passthrough()),
       max_requests_per_connection_(config.max_requests_per_connection().value()),
       header_keys_preserve_case_(config.header_keys_preserve_case()) {
@@ -168,10 +114,10 @@ ConfigImpl::ConfigImpl(
       }
     }
     route_config_provider_ = route_config_provider_manager.createRdsRouteConfigProvider(
-        config.trds(), context_.getServerFactoryContext(), stats_prefix_, context_.initManager());
+        config.trds(), context_.serverFactoryContext(), stats_prefix_, context_.initManager());
   } else {
     route_config_provider_ = route_config_provider_manager.createStaticRouteConfigProvider(
-        config.route_config(), context_.getServerFactoryContext());
+        config.route_config(), context_.serverFactoryContext());
   }
 
   for (const envoy::config::accesslog::v3::AccessLog& log_config : config.access_log()) {

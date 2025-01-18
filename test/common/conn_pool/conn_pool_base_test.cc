@@ -25,6 +25,7 @@ public:
       : ActiveClient(parent, lifetime_stream_limit, concurrent_stream_limit),
         supports_early_data_(supports_early_data) {}
 
+  void initializeReadFilters() override {}
   void close() override { onEvent(Network::ConnectionEvent::LocalClose); }
   uint64_t id() const override { return 1; }
   bool closingWithIncompleteStream() const override { return false; }
@@ -296,7 +297,7 @@ TEST_F(ConnPoolImplBaseTest, NoPreconnectIfUnhealthy) {
   ON_CALL(*cluster_, perUpstreamPreconnectRatio).WillByDefault(Return(1.5));
 
   host_->healthFlagSet(Upstream::Host::HealthFlag::FAILED_ACTIVE_HC);
-  EXPECT_EQ(host_->health(), Upstream::Host::Health::Unhealthy);
+  EXPECT_EQ(host_->coarseHealth(), Upstream::Host::Health::Unhealthy);
 
   // On new stream, create 1 connection.
   EXPECT_CALL(pool_, instantiateActiveClient);
@@ -311,9 +312,9 @@ TEST_F(ConnPoolImplBaseTest, NoPreconnectIfDegraded) {
   // Create more than one connection per new stream.
   ON_CALL(*cluster_, perUpstreamPreconnectRatio).WillByDefault(Return(1.5));
 
-  EXPECT_EQ(host_->health(), Upstream::Host::Health::Healthy);
+  EXPECT_EQ(host_->coarseHealth(), Upstream::Host::Health::Healthy);
   host_->healthFlagSet(Upstream::Host::HealthFlag::DEGRADED_EDS_HEALTH);
-  EXPECT_EQ(host_->health(), Upstream::Host::Health::Degraded);
+  EXPECT_EQ(host_->coarseHealth(), Upstream::Host::Health::Degraded);
 
   // On new stream, create 1 connection.
   EXPECT_CALL(pool_, instantiateActiveClient);
@@ -374,13 +375,13 @@ TEST_F(ConnPoolImplDispatcherBaseTest, MaxConnectionDurationBusy) {
   // Verify that advancing to just before the connection duration timeout doesn't drain the
   // connection.
   advanceTimeAndRun(max_connection_duration_ - 1);
-  EXPECT_EQ(0, pool_.host()->cluster().stats().upstream_cx_max_duration_reached_.value());
+  EXPECT_EQ(0, pool_.host()->cluster().trafficStats()->upstream_cx_max_duration_reached_.value());
   EXPECT_EQ(ActiveClient::State::Busy, clients_.back()->state());
 
   // Verify that advancing past the connection duration timeout drains the connection,
   // because there's a busy client.
   advanceTimeAndRun(2);
-  EXPECT_EQ(1, pool_.host()->cluster().stats().upstream_cx_max_duration_reached_.value());
+  EXPECT_EQ(1, pool_.host()->cluster().trafficStats()->upstream_cx_max_duration_reached_.value());
   EXPECT_EQ(ActiveClient::State::Draining, clients_.back()->state());
   closeStream();
 }
@@ -395,13 +396,13 @@ TEST_F(ConnPoolImplDispatcherBaseTest, MaxConnectionDurationReady) {
   // Verify that advancing to just before the connection duration timeout doesn't close the
   // connection.
   advanceTimeAndRun(max_connection_duration_ - 1);
-  EXPECT_EQ(0, pool_.host()->cluster().stats().upstream_cx_max_duration_reached_.value());
+  EXPECT_EQ(0, pool_.host()->cluster().trafficStats()->upstream_cx_max_duration_reached_.value());
   EXPECT_EQ(ActiveClient::State::Ready, clients_.back()->state());
 
   // Verify that advancing past the connection duration timeout closes the connection,
   // because there's nothing to drain.
   advanceTimeAndRun(2);
-  EXPECT_EQ(1, pool_.host()->cluster().stats().upstream_cx_max_duration_reached_.value());
+  EXPECT_EQ(1, pool_.host()->cluster().trafficStats()->upstream_cx_max_duration_reached_.value());
 }
 
 TEST_F(ConnPoolImplDispatcherBaseTest, MaxConnectionDurationAlreadyDraining) {
@@ -411,7 +412,7 @@ TEST_F(ConnPoolImplDispatcherBaseTest, MaxConnectionDurationAlreadyDraining) {
   // Verify that advancing past the connection duration timeout does nothing to an active client
   // that is already draining.
   advanceTimeAndRun(max_connection_duration_ + 1);
-  EXPECT_EQ(0, pool_.host()->cluster().stats().upstream_cx_max_duration_reached_.value());
+  EXPECT_EQ(0, pool_.host()->cluster().trafficStats()->upstream_cx_max_duration_reached_.value());
   EXPECT_EQ(ActiveClient::State::Draining, clients_.back()->state());
   closeStream();
 }
@@ -423,7 +424,7 @@ TEST_F(ConnPoolImplDispatcherBaseTest, MaxConnectionDurationAlreadyClosed) {
   // Verify that advancing past the connection duration timeout does nothing to the active
   // client that is already closed.
   advanceTimeAndRun(max_connection_duration_ + 1);
-  EXPECT_EQ(0, pool_.host()->cluster().stats().upstream_cx_max_duration_reached_.value());
+  EXPECT_EQ(0, pool_.host()->cluster().trafficStats()->upstream_cx_max_duration_reached_.value());
 }
 
 TEST_F(ConnPoolImplDispatcherBaseTest, MaxConnectionDurationCallbackWhileClosedBug) {
@@ -472,6 +473,19 @@ TEST_F(ConnPoolImplDispatcherBaseTest, NoAvailableStreams) {
   pool_.destructAllConnections();
 }
 
+// Verify that not fully connected active client calls
+// idle callbacks upon destruction.
+TEST_F(ConnPoolImplBaseTest, PoolIdleNotConnected) {
+  auto active_client = std::make_unique<NiceMock<TestActiveClient>>(pool_, stream_limit_,
+                                                                    concurrent_streams_, false);
+
+  testing::MockFunction<void()> idle_pool_callback;
+  EXPECT_CALL(idle_pool_callback, Call());
+  pool_.addIdleCallbackImpl(idle_pool_callback.AsStdFunction());
+
+  pool_.drainConnectionsImpl(Envoy::ConnectionPool::DrainBehavior::DrainAndDelete);
+}
+
 // Remote close simulates the peer closing the connection.
 TEST_F(ConnPoolImplBaseTest, PoolIdleCallbackTriggeredRemoteClose) {
   EXPECT_CALL(dispatcher_, createTimer_(_)).Times(AnyNumber());
@@ -490,13 +504,13 @@ TEST_F(ConnPoolImplBaseTest, PoolIdleCallbackTriggeredRemoteClose) {
   pool_.onStreamClosed(*clients_.back(), false);
 
   // Now that the last connection is closed, while there are no requests, the pool becomes idle.
+  // idle_pool_callback should be called once.
   testing::MockFunction<void()> idle_pool_callback;
   EXPECT_CALL(idle_pool_callback, Call());
   pool_.addIdleCallbackImpl(idle_pool_callback.AsStdFunction());
   dispatcher_.clearDeferredDeleteList();
   clients_.back()->onEvent(Network::ConnectionEvent::RemoteClose);
 
-  EXPECT_CALL(idle_pool_callback, Call());
   pool_.drainConnectionsImpl(Envoy::ConnectionPool::DrainBehavior::DrainAndDelete);
 }
 
@@ -518,13 +532,13 @@ TEST_F(ConnPoolImplBaseTest, PoolIdleCallbackTriggeredLocalClose) {
   pool_.onStreamClosed(*clients_.back(), false);
 
   // Now that the last connection is closed, while there are no requests, the pool becomes idle.
+  // idle_pool_callback should be called once.
   testing::MockFunction<void()> idle_pool_callback;
   EXPECT_CALL(idle_pool_callback, Call());
   pool_.addIdleCallbackImpl(idle_pool_callback.AsStdFunction());
   dispatcher_.clearDeferredDeleteList();
   clients_.back()->onEvent(Network::ConnectionEvent::LocalClose);
 
-  EXPECT_CALL(idle_pool_callback, Call());
   pool_.drainConnectionsImpl(Envoy::ConnectionPool::DrainBehavior::DrainAndDelete);
 }
 
@@ -565,7 +579,7 @@ TEST_F(ConnPoolImplDispatcherBaseTest, ConnectedZeroRttSendsEarlyData) {
   pool_.onUpstreamReadyForEarlyData(client_ref);
 
   CHECK_STATE(1 /*active*/, 0 /*pending*/, concurrent_streams_ - 1 /*connecting capacity*/);
-  EXPECT_EQ(1, pool_.host()->cluster().stats().upstream_rq_0rtt_.value());
+  EXPECT_EQ(1, pool_.host()->cluster().trafficStats()->upstream_rq_0rtt_.value());
 
   EXPECT_NE(nullptr, pool_.newStreamImpl(context_, /*can_send_early_data=*/false));
   CHECK_STATE(1 /*active*/, 1 /*pending*/, concurrent_streams_ - 1 /*connecting capacity*/);
@@ -574,7 +588,7 @@ TEST_F(ConnPoolImplDispatcherBaseTest, ConnectedZeroRttSendsEarlyData) {
   clients_.back()->onEvent(Network::ConnectionEvent::Connected);
 
   CHECK_STATE(2 /*active*/, 0 /*pending*/, 0 /*connecting capacity*/);
-  EXPECT_EQ(1, pool_.host()->cluster().stats().upstream_rq_0rtt_.value());
+  EXPECT_EQ(1, pool_.host()->cluster().trafficStats()->upstream_rq_0rtt_.value());
 
   // Clean up.
   closeStreamAndDrainClient();
@@ -596,12 +610,12 @@ TEST_F(ConnPoolImplDispatcherBaseTest, EarlyDataStreamsReachConcurrentStreamLimi
   pool_.onUpstreamReadyForEarlyData(client_ref);
 
   CHECK_STATE(1 /*active*/, 0 /*pending*/, concurrent_streams_ - 1 /*connecting capacity*/);
-  EXPECT_EQ(1, pool_.host()->cluster().stats().upstream_rq_0rtt_.value());
+  EXPECT_EQ(1, pool_.host()->cluster().trafficStats()->upstream_rq_0rtt_.value());
 
   EXPECT_CALL(pool_, onPoolReady);
   EXPECT_EQ(nullptr, pool_.newStreamImpl(context_, /*can_send_early_data=*/true));
   CHECK_STATE(2 /*active*/, 0 /*pending*/, concurrent_streams_ - 2 /*connecting capacity*/);
-  EXPECT_EQ(2, pool_.host()->cluster().stats().upstream_rq_0rtt_.value());
+  EXPECT_EQ(2, pool_.host()->cluster().trafficStats()->upstream_rq_0rtt_.value());
   EXPECT_EQ(ActiveClient::State::Busy, clients_.back()->state());
 
   // After 1 stream gets closed, the client should transit to ReadyForEarlyData.

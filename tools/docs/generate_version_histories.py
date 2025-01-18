@@ -6,7 +6,7 @@ from functools import cached_property
 
 from frozendict import frozendict
 import jinja2
-from packaging import version
+from packaging import version as _version
 
 from aio.run import runner
 
@@ -147,7 +147,7 @@ class VersionHistories(runner.Runner):
 
     @cached_property
     def project(self) -> IProject:
-        return Project()
+        return Project(path=self.args.path)
 
     @cached_property
     def sections(self) -> frozendict:
@@ -171,6 +171,7 @@ class VersionHistories(runner.Runner):
 
     def add_arguments(self, parser) -> None:
         super().add_arguments(parser)
+        parser.add_argument("--path")
         parser.add_argument("output_file")
 
     def minor_index_path(self, minor_version) -> pathlib.Path:
@@ -185,14 +186,14 @@ class VersionHistories(runner.Runner):
         self.write_tarball()
 
     def write_tarball(self) -> None:
-        with tarfile.open(self.args.output_file, "w") as tarball:
+        with tarfile.open(self.args.output_file, "w:gz") as tarball:
             tarball.add(self.tpath, arcname="./")
 
     async def write_version_histories(self) -> None:
         for changelog_version in self.project.changelogs:
             await self.write_version_history(changelog_version)
 
-    async def write_version_history(self, changelog_version: version.Version) -> None:
+    async def write_version_history(self, changelog_version: _version.Version) -> None:
         minor_version = utils.minor_version_for(changelog_version)
         root_path = self.tpath.joinpath(f"v{minor_version.base_version}")
         root_path.mkdir(parents=True, exist_ok=True)
@@ -205,9 +206,11 @@ class VersionHistories(runner.Runner):
             mapped_version=(minor_version if map_version else None),
             sections=self.sections,
             data=data,
-            entries={s: await changelog.entries(s)
-                     for s in self.sections
-                     if s in data},
+            entries={
+                s: sorted(await changelog.entries(s), key=self._sort_entries)
+                for s in self.sections
+                if s in data
+            },
             release_date=await changelog.release_date,
             changelog=changelog)
         version_path = root_path.joinpath(f"v{changelog_version}.rst")
@@ -256,7 +259,7 @@ class VersionHistories(runner.Runner):
             await self.write_version_history_minor_index(minor_version, patches)
 
     async def write_version_history_minor_index(
-            self, minor_version: version.Version, patch_versions) -> None:
+            self, minor_version: _version.Version, patch_versions) -> None:
         skip_first = (self.project.is_dev and self.project.is_current(patch_versions[0]))
         if skip_first:
             patch_versions = patch_versions[1:]
@@ -271,6 +274,10 @@ class VersionHistories(runner.Runner):
             patch_versions=patch_versions)
         self.minor_index_path(minor_version).write_text(
             f"{version_history_minor_index.strip()}\n\n")
+
+    def _sort_entries(self, entry):
+        # TODO(phlax): fix sorting in `envoy.base.utils` and remove
+        return entry.area, entry.change
 
 
 def main(*args):

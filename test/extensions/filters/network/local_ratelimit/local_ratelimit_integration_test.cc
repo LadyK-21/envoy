@@ -8,13 +8,7 @@ class LocalRateLimitIntegrationTest : public Event::TestUsingSimulatedTime,
                                       public BaseIntegrationTest {
 public:
   LocalRateLimitIntegrationTest()
-      : BaseIntegrationTest(GetParam(), ConfigHelper::tcpProxyConfig()) {
-    // TODO(ggreenway): add tag extraction rules.
-    // Missing stat tag-extraction rule for stat
-    // 'http_local_rate_limiter.http_local_rate_limit.rate_limited' and stat_prefix
-    // 'http_local_rate_limiter'.
-    skip_tag_extraction_rule_check_ = true;
-  }
+      : BaseIntegrationTest(GetParam(), ConfigHelper::tcpProxyConfig()) {}
 
   void setup(const std::string& filter_yaml = {}) {
     if (!filter_yaml.empty()) {
@@ -63,7 +57,7 @@ typed_config:
   token_bucket:
     max_tokens: 1
     # Set fill_interval to effectively infinite so we only get max_tokens to start and never re-fill.
-    fill_interval: 100000s
+    fill_interval: 1000s
 )EOF");
 
   IntegrationTcpClientPtr tcp_client = makeTcpConnection(lookupPort("listener_0"));
@@ -94,7 +88,7 @@ typed_config:
   token_bucket:
     max_tokens: 2
     # Set fill_interval to effectively infinite so we only get max_tokens to start and never re-fill.
-    fill_interval: 100000s
+    fill_interval: 1000s
 )EOF");
 
     // Clone the whole listener, which includes the `share_key`.

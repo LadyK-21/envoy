@@ -14,8 +14,18 @@ class RegexEngineIntegrationTest : public testing::TestWithParam<Network::Addres
 public:
   RegexEngineIntegrationTest() : BaseIntegrationTest(GetParam(), config()) {}
 
+  // Ensure that regex definitions in the stats matcher config will parse too
   static std::string config() {
     return absl::StrCat(ConfigHelper::baseConfigNoListeners(), R"EOF(
+stats_config:
+  stats_matcher:
+    exclusion_list:
+      patterns:
+        - safe_regex:
+            regex: "foobar.+"
+        - safe_regex:
+            regex: "barbaz.+"
+
 default_regex_engine:
   name: envoy.regex_engines.google_re2
   typed_config:
@@ -34,7 +44,8 @@ TEST_P(RegexEngineIntegrationTest, GoogleRE2) {
   envoy::type::matcher::v3::RegexMatcher matcher;
   *matcher.mutable_regex() = ".*";
 
-  EXPECT_NO_THROW(Regex::Utility::parseRegex(matcher));
+  EXPECT_TRUE(
+      Regex::Utility::parseRegex(matcher, test_server_->server().regexEngine()).status().ok());
 };
 
 } // namespace

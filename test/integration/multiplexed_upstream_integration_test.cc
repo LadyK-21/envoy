@@ -75,7 +75,13 @@ TEST_P(MultiplexedUpstreamIntegrationTest, RouterDownstreamDisconnectBeforeRespo
 }
 
 TEST_P(MultiplexedUpstreamIntegrationTest, RouterUpstreamResponseBeforeRequestComplete) {
+  config_helper_.addRuntimeOverride(
+      "envoy.reloadable_features.allow_multiplexed_upstream_half_close", "false");
   testRouterUpstreamResponseBeforeRequestComplete();
+}
+
+TEST_P(MultiplexedUpstreamIntegrationTest, RouterUpstreamResponseWithErrorBeforeRequestComplete) {
+  testRouterUpstreamResponseBeforeRequestComplete(400);
 }
 
 TEST_P(MultiplexedUpstreamIntegrationTest, Retry) { testRetry(); }
@@ -83,6 +89,19 @@ TEST_P(MultiplexedUpstreamIntegrationTest, Retry) { testRetry(); }
 TEST_P(MultiplexedUpstreamIntegrationTest, GrpcRetry) { testGrpcRetry(); }
 
 TEST_P(MultiplexedUpstreamIntegrationTest, Trailers) { testTrailers(1024, 2048, true, true); }
+
+TEST_P(MultiplexedUpstreamIntegrationTest, RouterRequestAndResponseWithTcpKeepalive) {
+  config_helper_.addConfigModifier([](envoy::config::bootstrap::v3::Bootstrap& bootstrap) {
+    auto keepalive = bootstrap.mutable_static_resources()
+                         ->mutable_clusters(0)
+                         ->mutable_upstream_connection_options()
+                         ->mutable_tcp_keepalive();
+    keepalive->mutable_keepalive_probes()->set_value(4);
+    keepalive->mutable_keepalive_time()->set_value(7);
+    keepalive->mutable_keepalive_interval()->set_value(1);
+  });
+  testRouterRequestAndResponseWithBody(1024, 512, false);
+}
 
 TEST_P(MultiplexedUpstreamIntegrationTest, TestSchemeAndXFP) {
   autonomous_upstream_ = true;
@@ -156,11 +175,15 @@ void MultiplexedUpstreamIntegrationTest::bidirectionalStreaming(uint32_t bytes) 
 
   ASSERT_FALSE(response->headers().get(Http::LowerCaseString("upstream_connect_start")).empty());
   ASSERT_FALSE(response->headers().get(Http::LowerCaseString("upstream_connect_complete")).empty());
+  ASSERT_FALSE(response->headers().get(Http::LowerCaseString("connection_pool_latency")).empty());
 
   ASSERT_FALSE(response->headers().get(Http::LowerCaseString("num_streams")).empty());
   EXPECT_EQ(
       "1",
       response->headers().get(Http::LowerCaseString("num_streams"))[0]->value().getStringView());
+  EXPECT_EQ(
+      fake_upstreams_[0]->localAddress()->asString(),
+      response->headers().get(Http::LowerCaseString("remote_address"))[0]->value().getStringView());
 }
 
 TEST_P(MultiplexedUpstreamIntegrationTest, BidirectionalStreaming) { bidirectionalStreaming(1024); }
@@ -338,25 +361,22 @@ TEST_P(MultiplexedUpstreamIntegrationTest, ManyLargeSimultaneousRequestWithBuffe
   manySimultaneousRequests(1024 * 20, 1024 * 20);
 }
 
-TEST_P(MultiplexedUpstreamIntegrationTest, ManyLargeSimultaneousRequestWithRandomBackup) {
+// TODO(kbaichoo): fix this test to work with deferred processing.
+// We've augmented the pause filter to lower the watermark when the filter has raised above
+// watermark but will follow up with getting the timing correct in another PR.
+TEST_P(MultiplexedUpstreamIntegrationTest, DISABLED_ManyLargeSimultaneousRequestWithRandomBackup) {
   // random-pause-filter does not support HTTP3.
   if (upstreamProtocol() == Http::CodecType::HTTP3) {
     return;
   }
 
-  if (GetParam().defer_processing_backedup_streams) {
-    // TODO(kbaichoo): fix this test to work with deferred processing by using a
-    // timer to lower the watermark when the filter has raised above watermark.
-    // Since we deferred processing data, when the filter raises watermark
-    // with deferred processing we won't invoke it again which could lower
-    // the watermark.
-    return;
-  }
   config_helper_.prependFilter(R"EOF(
   name: random-pause-filter
 )EOF");
 
-  manySimultaneousRequests(1024 * 20, 1024 * 20);
+  // TODO(kbaichoo): either change the ordering of how the responses wait on end stream or increase
+  // the timeout since there will be delays added by the pause filter.
+  manySimultaneousRequests(1024 * 20, 1024 * 20, 50);
 }
 
 TEST_P(MultiplexedUpstreamIntegrationTest, UpstreamConnectionCloseWithManyStreams) {
@@ -650,10 +670,6 @@ TEST_P(MultiplexedUpstreamIntegrationTest, UpstreamGoaway) {
 }
 
 TEST_P(MultiplexedUpstreamIntegrationTest, AutoRetrySafeRequestUponTooEarlyResponse) {
-  if (!Runtime::runtimeFeatureEnabled(Runtime::conn_pool_new_stream_with_early_data_and_http3)) {
-    return;
-  }
-
   initialize();
   codec_client_ = makeHttpConnection(lookupPort("http"));
 
@@ -782,9 +798,7 @@ TEST_P(MultiplexedUpstreamIntegrationTest, UpstreamEarlyDataRejected) {
   // TODO: debug why waiting on the 0-rtt upstream connection times out on Windows.
   GTEST_SKIP() << "Skipping on Windows";
 #endif
-  if (upstreamProtocol() != Http::CodecType::HTTP3 ||
-      !(Runtime::runtimeFeatureEnabled(Runtime::conn_pool_new_stream_with_early_data_and_http3) &&
-        Runtime::runtimeFeatureEnabled("envoy.reloadable_features.http3_sends_early_data"))) {
+  if (upstreamProtocol() != Http::CodecType::HTTP3) {
     return;
   }
   initialize();
@@ -874,12 +888,9 @@ TEST_P(MultiplexedUpstreamIntegrationTest, UpstreamDisconnectDuringEarlyData) {
   // TODO: debug why waiting on the 0-rtt upstream connection times out on Windows.
   GTEST_SKIP() << "Skipping on Windows";
 #endif
-  if (upstreamProtocol() != Http::CodecType::HTTP3 ||
-      !(Runtime::runtimeFeatureEnabled(Runtime::conn_pool_new_stream_with_early_data_and_http3) &&
-        Runtime::runtimeFeatureEnabled("envoy.reloadable_features.http3_sends_early_data"))) {
+  if (upstreamProtocol() != Http::CodecType::HTTP3) {
     return;
   }
-  Runtime::maybeSetRuntimeGuard("envoy.reloadable_features.no_extension_lookup_by_name", false);
 
   // Register and config this factory to control upstream QUIC handshakes.
   QuicFailHandshakeCryptoServerStreamFactory crypto_stream_factory;
@@ -888,8 +899,9 @@ TEST_P(MultiplexedUpstreamIntegrationTest, UpstreamDisconnectDuringEarlyData) {
   crypto_stream_factory.setFailHandshake(false);
 
   envoy::config::listener::v3::QuicProtocolOptions options;
-  options.mutable_crypto_stream_config()->set_name(
-      "envoy.quic.crypto_stream.server.fail_handshake");
+  auto* crypto_stream_config = options.mutable_crypto_stream_config();
+  crypto_stream_config->set_name("envoy.quic.crypto_stream.server.fail_handshake");
+  crypto_stream_config->mutable_typed_config()->PackFrom(ProtobufWkt::Struct());
   mergeOptions(options);
 
   initialize();
@@ -933,9 +945,7 @@ TEST_P(MultiplexedUpstreamIntegrationTest, DownstreamDisconnectDuringEarlyData) 
   // TODO: debug why waiting on the 0-rtt upstream connection times out on Windows.
   GTEST_SKIP() << "Skipping on Windows";
 #endif
-  if (upstreamProtocol() != Http::CodecType::HTTP3 ||
-      !(Runtime::runtimeFeatureEnabled(Runtime::conn_pool_new_stream_with_early_data_and_http3) &&
-        Runtime::runtimeFeatureEnabled("envoy.reloadable_features.http3_sends_early_data"))) {
+  if (upstreamProtocol() != Http::CodecType::HTTP3) {
     return;
   }
   initialize();
@@ -985,9 +995,7 @@ TEST_P(MultiplexedUpstreamIntegrationTest, ConnPoolQueuingNonSafeRequest) {
   // TODO: debug why waiting on the 0-rtt upstream connection times out on Windows.
   GTEST_SKIP() << "Skipping on Windows";
 #endif
-  if (upstreamProtocol() != Http::CodecType::HTTP3 ||
-      !(Runtime::runtimeFeatureEnabled(Runtime::conn_pool_new_stream_with_early_data_and_http3) &&
-        Runtime::runtimeFeatureEnabled("envoy.reloadable_features.http3_sends_early_data"))) {
+  if (upstreamProtocol() != Http::CodecType::HTTP3) {
     return;
   }
   initialize();

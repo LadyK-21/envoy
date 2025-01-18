@@ -4,8 +4,10 @@
 
 #include "test/extensions/filters/http/common/fuzz/http_filter_fuzzer.h"
 #include "test/fuzz/utility.h"
+#include "test/mocks/api/mocks.h"
 #include "test/mocks/buffer/mocks.h"
 #include "test/mocks/http/mocks.h"
+#include "test/mocks/network/mocks.h"
 #include "test/mocks/server/factory_context.h"
 #include "test/mocks/stream_info/mocks.h"
 #include "test/test_common/test_runtime.h"
@@ -38,6 +40,7 @@ protected:
 private:
   NiceMock<Upstream::MockClusterManager> cluster_manager_;
   NiceMock<Server::Configuration::MockFactoryContext> factory_context_;
+  NiceMock<Network::MockListenerInfo> listener_info_;
   NiceMock<Http::MockFilterChainFactoryCallbacks> filter_callback_;
   std::shared_ptr<Network::MockDnsResolver> resolver_{std::make_shared<Network::MockDnsResolver>()};
   Http::FilterFactoryCb cb_;
@@ -57,6 +60,11 @@ private:
   // Mocked callbacks.
   NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_callbacks_;
   NiceMock<Http::MockStreamEncoderFilterCallbacks> encoder_callbacks_;
+
+  Api::MockApi api_{};
+  Thread::ThreadFactory& thread_factory_;
+  Event::DispatcherPtr worker_thread_dispatcher_;
+  std::function<void()> destroy_filters_ = []() {};
 
   const Buffer::Instance* decoding_buffer_{};
 };

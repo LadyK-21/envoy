@@ -4,8 +4,8 @@ Local rate limit
 ================
 
 * Local rate limiting :ref:`architecture overview <arch_overview_local_rate_limit>`
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit``.
 * :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.local_ratelimit.v3.LocalRateLimit>`
-* This filter should be configured with the name *envoy.filters.http.local_ratelimit*.
 
 The HTTP local rate limit filter applies a :ref:`token bucket
 <envoy_v3_api_field_extensions.filters.http.local_ratelimit.v3.LocalRateLimit.token_bucket>` rate
@@ -76,7 +76,7 @@ settings are then used to decide if the request should be rate limited or not
 depending on whether the local descriptor's entries match the route's rate
 limit actions descriptor entries. If there is no matching descriptor entries,
 the default token bucket is used. All the matched local descriptors will be
-sorterd by tokens per second and try to consume tokens in order, in most cases
+sorted by tokens per second and try to consume tokens in order, in most cases
 if one of them is limited, the remaining descriptors will not consume their tokens.
 However, in some cases, it may not work, for example, we have two descriptors
 A and B, A is limited 3 requests per second, and B is limited 20 requests per 10 seconds.
@@ -93,8 +93,8 @@ Example filter configuration using descriptors:
    :lineno-start: 21
    :caption: :download:`local-rate-limit-with-descriptors.yaml <_include/local-rate-limit-with-descriptors.yaml>`
 
-In this example, requests are rate-limited for routes prefixed with "/foo" as
-follow. If requests come from a downstream service cluster "foo" for "/foo/bar"
+In this example, requests are rate-limited for routes prefixed with "/foo" as follows.
+If requests come from a downstream service cluster "foo" for "/foo/bar"
 path, then 10 req/min are allowed. But if they come from a downstream service
 cluster "foo" for "/foo/bar2" path, then 100 req/min are allowed. Otherwise,
 1000 req/min are allowed.
@@ -102,7 +102,7 @@ cluster "foo" for "/foo/bar2" path, then 100 req/min are allowed. Otherwise,
 Statistics
 ----------
 
-The local rate limit filter outputs statistics in the *<stat_prefix>.http_local_rate_limit.* namespace.
+The local rate limit filter outputs statistics in the ``<stat_prefix>.http_local_rate_limit.`` namespace.
 429 responses -- or the configured status code -- are emitted to the normal cluster :ref:`dynamic HTTP statistics
 <config_cluster_manager_cluster_stats_dynamic_http>`.
 

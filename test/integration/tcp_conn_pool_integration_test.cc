@@ -86,11 +86,12 @@ private:
 class TestFilterConfigFactory : public Server::Configuration::NamedNetworkFilterConfigFactory {
 public:
   // NamedNetworkFilterConfigFactory
-  Network::FilterFactoryCb
+  absl::StatusOr<Network::FilterFactoryCb>
   createFilterFactoryFromProto(const Protobuf::Message&,
                                Server::Configuration::FactoryContext& context) override {
     return [&context](Network::FilterManager& filter_manager) -> void {
-      filter_manager.addReadFilter(std::make_shared<TestFilter>(context.clusterManager()));
+      filter_manager.addReadFilter(
+          std::make_shared<TestFilter>(context.serverFactoryContext().clusterManager()));
     };
   }
 
@@ -102,7 +103,7 @@ public:
 
   std::string name() const override { CONSTRUCT_ON_FIRST_USE(std::string, "envoy.test.router"); }
   bool isTerminalFilterByProto(const Protobuf::Message&,
-                               Server::Configuration::FactoryContext&) override {
+                               Server::Configuration::ServerFactoryContext&) override {
     return true;
   }
 };
@@ -122,6 +123,7 @@ public:
       - filters:
         - name: envoy.test.router
           typed_config:
+            "@type": type.googleapis.com/google.protobuf.Struct
       )EOF");
   }
 

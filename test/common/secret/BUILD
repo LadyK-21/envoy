@@ -18,8 +18,9 @@ envoy_cc_test(
     name = "secret_manager_impl_test",
     srcs = ["secret_manager_impl_test.cc"],
     data = [
-        "//test/extensions/transport_sockets/tls/test_data:certs",
+        "//test/common/tls/test_data:certs",
     ],
+    rbe_pool = "6gig",
     deps = [
         ":private_key_provider_proto_cc_proto",
         "//source/common/secret:sds_api_lib",
@@ -45,12 +46,14 @@ envoy_cc_test(
     name = "sds_api_test",
     srcs = ["sds_api_test.cc"],
     data = [
-        "//test/extensions/transport_sockets/tls/test_data:certs",
+        "//test/common/tls/test_data:certs",
     ],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/secret:sds_api_lib",
         "//source/common/ssl:certificate_validation_context_config_impl_lib",
         "//source/common/ssl:tls_certificate_config_impl_lib",
+        "//source/extensions/config_subscription/filesystem:filesystem_subscription_lib",
         "//test/common/stats:stat_test_utility_lib",
         "//test/mocks/config:config_mocks",
         "//test/mocks/filesystem:filesystem_mocks",

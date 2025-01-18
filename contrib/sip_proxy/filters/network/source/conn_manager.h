@@ -43,6 +43,8 @@ public:
   virtual std::shared_ptr<SipSettings> settings() PURE;
 };
 
+using ConfigSharedPtr = std::shared_ptr<Config>;
+
 /**
  * Extends Upstream::ProtocolOptionsConfig with Sip-specific cluster options.
  */
@@ -66,12 +68,13 @@ public:
       Server::Configuration::FactoryContext& context, StreamInfo::StreamInfoImpl& stream_info);
 
   virtual void updateTrafficRoutingAssistant(const std::string& type, const std::string& key,
-                                             const std::string& val);
-  virtual QueryStatus
-  retrieveTrafficRoutingAssistant(const std::string& type, const std::string& key,
-                                  SipFilters::DecoderFilterCallbacks& activetrans,
-                                  std::string& host);
-  virtual void deleteTrafficRoutingAssistant(const std::string& type, const std::string& key);
+                                             const std::string& val,
+                                             const absl::optional<TraContextMap> context);
+  virtual QueryStatus retrieveTrafficRoutingAssistant(
+      const std::string& type, const std::string& key, const absl::optional<TraContextMap> context,
+      SipFilters::DecoderFilterCallbacks& activetrans, std::string& host);
+  virtual void deleteTrafficRoutingAssistant(const std::string& type, const std::string& key,
+                                             const absl::optional<TraContextMap> context);
   virtual void subscribeTrafficRoutingAssistant(const std::string& type);
   void complete(const TrafficRoutingAssistant::ResponseType& type, const std::string& message_type,
                 const absl::any& resp) override;
@@ -98,7 +101,7 @@ class ConnectionManager : public Network::ReadFilter,
                           public PendingListHandler,
                           Logger::Loggable<Logger::Id::connection> {
 public:
-  ConnectionManager(Config& config, Random::RandomGenerator& random_generator,
+  ConnectionManager(const ConfigSharedPtr& config, Random::RandomGenerator& random_generator,
                     TimeSource& time_system, Server::Configuration::FactoryContext& context,
                     std::shared_ptr<Router::TransactionInfos> transaction_infos);
   ~ConnectionManager() override;
@@ -116,7 +119,7 @@ public:
   // DecoderCallbacks
   DecoderEventHandler& newDecoderEventHandler(MessageMetadataSharedPtr metadata) override;
 
-  std::shared_ptr<SipSettings> settings() const override { return config_.settings(); }
+  std::shared_ptr<SipSettings> settings() const override { return config_->settings(); }
 
   void continueHandling(const std::string& key, bool try_next_affinity = false);
   void continueHandling(MessageMetadataSharedPtr metadata,
@@ -246,8 +249,11 @@ private:
           stream_id_(parent_.random_generator_.random()),
           transaction_id_(metadata->transactionId().value()),
           stream_info_(parent_.time_source_,
-                       parent_.read_callbacks_->connection().connectionInfoProviderSharedPtr()),
-          metadata_(metadata) {}
+                       parent_.read_callbacks_->connection().connectionInfoProviderSharedPtr(),
+                       StreamInfo::FilterState::LifeSpan::FilterChain),
+          metadata_(metadata) {
+      parent.stats_.request_active_.inc();
+    }
     ~ActiveTrans() override {
       request_timer_->complete();
       parent_.stats_.request_active_.dec();
@@ -295,7 +301,7 @@ private:
     std::shared_ptr<Router::TransactionInfos> transactionInfos() override {
       return parent_.transaction_infos_;
     }
-    std::shared_ptr<SipSettings> settings() const override { return parent_.config_.settings(); }
+    std::shared_ptr<SipSettings> settings() const override { return parent_.config_->settings(); }
     void onReset() override;
     std::shared_ptr<TrafficRoutingAssistantHandler> traHandler() override {
       return parent_.tra_handler_;
@@ -346,10 +352,11 @@ private:
 
   void dispatch();
   void sendLocalReply(MessageMetadata& metadata, const DirectResponse& response, bool end_stream);
+  void setLocalResponseSent(absl::string_view transaction_id);
   void doDeferredTransDestroy(ActiveTrans& trans);
   void resetAllTrans(bool local_reset);
 
-  Config& config_;
+  ConfigSharedPtr config_;
   SipFilterStats& stats_;
 
   Network::ReadFilterCallbacks* read_callbacks_{};

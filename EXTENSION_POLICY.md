@@ -50,6 +50,17 @@ reviewers or new contributors that are willing to step into the role of extensio
 [vote of the maintainers](./GOVERNANCE.md#conflict-resolution-and-voting) can be called to remove the
 extension from the repository.
 
+Extension removal process:
+
+  1. A GitHub Issue is opened listing the reason for extension removal and any available replacements.
+  2. Extension factory is modified to emit a deprecation warning.
+  3. This starts a 6 month deprecation interval, after which extension is decommissioned.
+  4. An announcement about extension deprecation is sent to the
+     [envoy-announce](https://groups.google.com/forum/#!forum/envoy-announce) email list, with the
+     instruction to comment on the GitHub issue to extend the deprecation interval. Heavily used
+     extensions may have their deprecation interval extended by 6 more months.
+  5. After the deprecation interval has expired the extension source code is removed.
+
 ## Extension pull request reviews
 
 Extension PRs must not modify core Envoy code. In the event that an extension requires changes to core
@@ -147,6 +158,16 @@ included by default in the main image builds. Consumers need to pull directly fr
 images described in the installation guide. Please read the linked document in detail to determine
 whether contrib extensions are the right choice for a newly proposed extension.
 
+**NOTE:** Contrib extensions **require** an end-user sponsor. The sponsor is someone who will run
+the extension at sufficient scale as to make the build maintenance and other overhead worthwhile.
+The definition of "sufficient scale" is up to the maintainers and can change at any time. The
+end-user sponsor *does not* have to author the extension, but the end-user sponsor will need to make
+an "on the record" attestation of their planned usage of the extension. This attestation should
+occur in a GitHub issue opened to discuss the new extension. In this context "end user" has the
+same definition as the one specified in the [security policy](SECURITY.md#membership-criteria)
+membership criteria (point 1.3.5).
+
 **NOTE:** Contrib extensions are not eligible for Envoy security team coverage.
+
 **NOTE:** As per the linked Google Doc, contrib extensions generally should use `v3alpha` to avoid
 requiring API shepherd reviews.

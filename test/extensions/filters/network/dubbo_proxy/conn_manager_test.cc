@@ -117,18 +117,18 @@ public:
 
 class ConnectionManagerTest : public testing::Test {
 public:
-  ConnectionManagerTest()
-      : stats_(DubboFilterStats::generateStats("test.", store_)),
-        engine_(std::make_unique<Regex::GoogleReEngine>()) {
+  ConnectionManagerTest() : stats_(DubboFilterStats::generateStats("test.", *store_.rootScope())) {
 
-    route_config_provider_manager_ =
-        std::make_unique<Router::RouteConfigProviderManagerImpl>(factory_context_.admin_);
+    route_config_provider_manager_ = std::make_unique<Router::RouteConfigProviderManagerImpl>(
+        factory_context_.server_factory_context_.admin_);
   }
   ~ConnectionManagerTest() override {
     filter_callbacks_.connection_.dispatcher_.clearDeferredDeleteList();
   }
 
-  TimeSource& timeSystem() { return factory_context_.mainThreadDispatcher().timeSource(); }
+  TimeSource& timeSystem() {
+    return factory_context_.server_factory_context_.mainThreadDispatcher().timeSource();
+  }
 
   void initializeFilter() { initializeFilter(""); }
 
@@ -143,7 +143,7 @@ public:
     }
 
     proto_config_.set_stat_prefix("test");
-    config_ = std::make_unique<TestConfigImpl>(proto_config_, factory_context_,
+    config_ = std::make_shared<TestConfigImpl>(proto_config_, factory_context_,
                                                *route_config_provider_manager_, stats_);
     if (custom_serializer_) {
       config_->serializer_ = custom_serializer_;
@@ -154,7 +154,7 @@ public:
 
     ON_CALL(random_, random()).WillByDefault(Return(42));
     conn_manager_ = std::make_unique<ConnectionManager>(
-        *config_, random_, filter_callbacks_.connection_.dispatcher_.timeSource());
+        config_, random_, filter_callbacks_.connection_.dispatcher_.timeSource());
     conn_manager_->initializeReadFilterCallbacks(filter_callbacks_);
     conn_manager_->onNewConnection();
 
@@ -322,7 +322,7 @@ public:
   ConfigDubboProxy proto_config_;
 
   std::unique_ptr<Router::RouteConfigProviderManagerImpl> route_config_provider_manager_;
-  std::unique_ptr<TestConfigImpl> config_;
+  std::shared_ptr<TestConfigImpl> config_;
 
   Buffer::OwnedImpl buffer_;
   Buffer::OwnedImpl write_buffer_;
@@ -331,7 +331,6 @@ public:
   std::unique_ptr<ConnectionManager> conn_manager_;
   MockSerializer* custom_serializer_{};
   MockProtocol* custom_protocol_{};
-  ScopedInjectableLoader<Regex::Engine> engine_;
 };
 
 TEST_F(ConnectionManagerTest, OnDataHandlesRequestTwoWay) {
@@ -869,9 +868,9 @@ TEST_F(ConnectionManagerTest, OnDataWithFilterSendsLocalReply) {
   // First filter sends local reply.
   EXPECT_CALL(*first_filter, onMessageDecoded(_, _))
       .WillOnce(Invoke([&](MessageMetadataSharedPtr, ContextSharedPtr) -> FilterStatus {
-        callbacks->streamInfo().setResponseFlag(StreamInfo::ResponseFlag::NoRouteFound);
+        callbacks->streamInfo().setResponseFlag(StreamInfo::CoreResponseFlag::NoRouteFound);
         callbacks->sendLocalReply(direct_response, false);
-        return FilterStatus::StopIteration;
+        return FilterStatus::AbortIteration;
       }));
   EXPECT_CALL(filter_callbacks_.connection_, write(_, false))
       .WillOnce(Invoke([&](Buffer::Instance& buffer, bool) -> void {
@@ -918,7 +917,7 @@ TEST_F(ConnectionManagerTest, OnDataWithFilterSendsLocalErrorReply) {
   EXPECT_CALL(*first_filter, onMessageDecoded(_, _))
       .WillOnce(Invoke([&](MessageMetadataSharedPtr, ContextSharedPtr) -> FilterStatus {
         callbacks->sendLocalReply(direct_response, false);
-        return FilterStatus::StopIteration;
+        return FilterStatus::AbortIteration;
       }));
   EXPECT_CALL(filter_callbacks_.connection_, write(_, false))
       .WillOnce(Invoke([&](Buffer::Instance& buffer, bool) -> void {
@@ -1274,7 +1273,7 @@ TEST_F(ConnectionManagerTest, SendLocalReplyInMessageDecoded) {
         EXPECT_EQ(1, conn_manager_->getActiveMessagesForTest().size());
         EXPECT_NE(nullptr, conn_manager_->getActiveMessagesForTest().front()->metadata());
         callbacks->sendLocalReply(direct_response, false);
-        return FilterStatus::StopIteration;
+        return FilterStatus::AbortIteration;
       }));
 
   // The sendLocalReply is called, the ActiveMessage object should be destroyed.

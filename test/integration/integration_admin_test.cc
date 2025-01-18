@@ -274,7 +274,7 @@ TEST_P(IntegrationAdminTest, Admin) {
 
   EXPECT_EQ("200", request("admin", "GET", "/clusters?format=json", response));
   EXPECT_EQ("application/json", contentType(response));
-  EXPECT_NO_THROW(Json::Factory::loadFromString(response->body()));
+  EXPECT_TRUE(Json::Factory::loadFromString(response->body()).status().ok());
 
   EXPECT_EQ("400", request("admin", "POST", "/cpuprofiler", response));
   EXPECT_EQ("text/plain; charset=UTF-8", contentType(response));
@@ -318,45 +318,63 @@ TEST_P(IntegrationAdminTest, Admin) {
   EXPECT_EQ("200", request("admin", "GET", "/runtime?format=json", response));
   EXPECT_EQ("application/json", contentType(response));
 
-  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body());
-  auto entries = json->getObject("entries");
-  auto foo_obj = entries->getObject("foo");
-  EXPECT_EQ("bar", foo_obj->getString("final_value"));
-  auto foo1_obj = entries->getObject("foo1");
-  EXPECT_EQ("bar1", foo1_obj->getString("final_value"));
+  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body()).value();
+  auto entries = json->getObject("entries").value();
+  auto foo_obj = entries->getObject("foo").value();
+  EXPECT_EQ("bar", *foo_obj->getString("final_value"));
+  auto foo1_obj = entries->getObject("foo1").value();
+  EXPECT_EQ("bar1", *foo1_obj->getString("final_value"));
 
   EXPECT_EQ("200", request("admin", "GET", "/listeners", response));
   EXPECT_EQ("text/plain; charset=UTF-8", contentType(response));
   auto listeners = test_server_->server().listenerManager().listeners();
   auto listener_it = listeners.cbegin();
   for (; listener_it != listeners.end(); ++listener_it) {
-    EXPECT_THAT(response->body(),
-                HasSubstr(fmt::format(
-                    "{}::{}", listener_it->get().name(),
-                    listener_it->get().listenSocketFactory().localAddress()->asString())));
+    for (auto& socket_factory : listener_it->get().listenSocketFactories()) {
+      EXPECT_THAT(response->body(),
+                  HasSubstr(fmt::format("{}::{}", listener_it->get().name(),
+                                        socket_factory->localAddress()->asString())));
+    }
   }
 
   EXPECT_EQ("200", request("admin", "GET", "/listeners?format=json", response));
   EXPECT_EQ("application/json", contentType(response));
 
-  json = Json::Factory::loadFromString(response->body());
-  std::vector<Json::ObjectSharedPtr> listener_info = json->getObjectArray("listener_statuses");
+  json = Json::Factory::loadFromString(response->body()).value();
+  std::vector<Json::ObjectSharedPtr> listener_info =
+      json->getObjectArray("listener_statuses").value();
   auto listener_info_it = listener_info.cbegin();
   listeners = test_server_->server().listenerManager().listeners();
   listener_it = listeners.cbegin();
   for (; listener_info_it != listener_info.end() && listener_it != listeners.end();
        ++listener_info_it, ++listener_it) {
-    auto local_address = (*listener_info_it)->getObject("local_address");
-    auto socket_address = local_address->getObject("socket_address");
-    EXPECT_EQ(listener_it->get().listenSocketFactory().localAddress()->ip()->addressAsString(),
-              socket_address->getString("address"));
-    EXPECT_EQ(listener_it->get().listenSocketFactory().localAddress()->ip()->port(),
-              socket_address->getInteger("port_value"));
+    auto local_address = (*listener_info_it)->getObject("local_address").value();
+    auto socket_address = local_address->getObject("socket_address").value();
+    EXPECT_EQ(
+        listener_it->get().listenSocketFactories()[0]->localAddress()->ip()->addressAsString(),
+        *socket_address->getString("address"));
+    EXPECT_EQ(listener_it->get().listenSocketFactories()[0]->localAddress()->ip()->port(),
+              *socket_address->getInteger("port_value"));
+
+    std::vector<Json::ObjectSharedPtr> additional_local_addresses =
+        (*listener_info_it)->getObjectArray("additional_local_addresses").value();
+    for (std::vector<Json::ObjectSharedPtr>::size_type i = 0; i < additional_local_addresses.size();
+         i++) {
+      auto socket_address = *additional_local_addresses[i]->getObject("socket_address");
+      EXPECT_EQ(listener_it->get()
+                    .listenSocketFactories()[i + 1]
+                    ->localAddress()
+                    ->ip()
+                    ->addressAsString(),
+                *socket_address->getString("address"));
+      EXPECT_EQ(listener_it->get().listenSocketFactories()[i + 1]->localAddress()->ip()->port(),
+                *socket_address->getInteger("port_value"));
+    }
   }
 
   EXPECT_EQ("200", request("admin", "GET", "/config_dump", response));
   EXPECT_EQ("application/json", contentType(response));
-  json = Json::Factory::loadFromString(response->body());
+  json = Json::Factory::loadFromString(response->body()).value();
   size_t index = 0;
   const std::string expected_types[] = {"type.googleapis.com/envoy.admin.v3.BootstrapConfigDump",
                                         "type.googleapis.com/envoy.admin.v3.ClustersConfigDump",
@@ -365,8 +383,9 @@ TEST_P(IntegrationAdminTest, Admin) {
                                         "type.googleapis.com/envoy.admin.v3.RoutesConfigDump",
                                         "type.googleapis.com/envoy.admin.v3.SecretsConfigDump"};
 
-  for (const Json::ObjectSharedPtr& obj_ptr : json->getObjectArray("configs")) {
-    EXPECT_TRUE(expected_types[index].compare(obj_ptr->getString("@type")) == 0);
+  auto array = json->getObjectArray("configs").value();
+  for (const Json::ObjectSharedPtr& obj_ptr : array) {
+    EXPECT_TRUE(expected_types[index].compare(*obj_ptr->getString("@type")) == 0);
     index++;
   }
 
@@ -388,7 +407,7 @@ TEST_P(IntegrationAdminTest, Admin) {
 
   EXPECT_EQ("200", request("admin", "GET", "/config_dump?include_eds", response));
   EXPECT_EQ("application/json", contentType(response));
-  json = Json::Factory::loadFromString(response->body());
+  json = Json::Factory::loadFromString(response->body()).value();
   index = 0;
   const std::string expected_types_eds[] = {
       "type.googleapis.com/envoy.admin.v3.BootstrapConfigDump",
@@ -399,8 +418,9 @@ TEST_P(IntegrationAdminTest, Admin) {
       "type.googleapis.com/envoy.admin.v3.RoutesConfigDump",
       "type.googleapis.com/envoy.admin.v3.SecretsConfigDump"};
 
-  for (const Json::ObjectSharedPtr& obj_ptr : json->getObjectArray("configs")) {
-    EXPECT_TRUE(expected_types_eds[index].compare(obj_ptr->getString("@type")) == 0);
+  array = json->getObjectArray("configs").value();
+  for (const Json::ObjectSharedPtr& obj_ptr : array) {
+    EXPECT_TRUE(expected_types_eds[index].compare(*obj_ptr->getString("@type")) == 0);
     index++;
   }
 
@@ -470,7 +490,7 @@ TEST_P(IntegrationAdminTest, AdminOnDestroyCallbacks) {
   bool test = true;
 
   // add an handler which adds a callback to the list of callback called when connection is dropped.
-  auto callback = [&test](absl::string_view, Http::HeaderMap&, Buffer::Instance&,
+  auto callback = [&test](Http::HeaderMap&, Buffer::Instance&,
                           Server::AdminStream& admin_stream) -> Http::Code {
     auto on_destroy_callback = [&test]() { test = false; };
 
@@ -480,7 +500,7 @@ TEST_P(IntegrationAdminTest, AdminOnDestroyCallbacks) {
   };
 
   EXPECT_TRUE(
-      test_server_->server().admin().addHandler("/foo/bar", "hello", callback, true, false));
+      test_server_->server().admin()->addHandler("/foo/bar", "hello", callback, true, false));
 
   // As part of the request, on destroy() should be called and the on_destroy_callback invoked.
   BufferingStreamDecoderPtr response;

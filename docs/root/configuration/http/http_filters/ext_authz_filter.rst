@@ -3,8 +3,8 @@
 External Authorization
 ======================
 * External authorization :ref:`architecture overview <arch_overview_ext_authz>`
-* :ref:`HTTP filter v3 API reference <envoy_v3_api_msg_extensions.filters.http.ext_authz.v3.ExtAuthz>`
-* This filter should be configured with the name *envoy.filters.http.ext_authz*.
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz``.
+* :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.ext_authz.v3.ExtAuthz>`
 
 The external authorization filter calls an external gRPC or HTTP service to check whether an incoming
 HTTP request is authorized or not.
@@ -162,7 +162,7 @@ Statistics
 ----------
 .. _config_http_filters_ext_authz_stats:
 
-The HTTP filter outputs statistics in the *cluster.<route target cluster>.ext_authz.* namespace.
+The HTTP filter outputs statistics in the ``cluster.<route target cluster>.ext_authz.`` namespace.
 
 .. csv-table::
   :header: Name, Type, Description
@@ -182,7 +182,7 @@ Dynamic Metadata
 The External Authorization filter supports emitting dynamic metadata as an opaque ``google.protobuf.Struct``.
 
 When using a gRPC authorization server, dynamic metadata will be emitted only when the :ref:`CheckResponse
-<envoy_v3_api_msg_service.auth.v3.CheckResponse>` contains a filled :ref:`dynamic_metadata
+<envoy_v3_api_msg_service.auth.v3.CheckResponse>` contains a non-empty :ref:`dynamic_metadata
 <envoy_v3_api_field_service.auth.v3.CheckResponse.dynamic_metadata>` field.
 
 When using an HTTP authorization server, dynamic metadata will be emitted only when there are response headers
@@ -202,3 +202,10 @@ The fraction of requests for which the filter is enabled can be configured via t
 Tracing
 -------
 The ext_authz span keeps the sampling status of the parent span, i.e. in the tracing backend we will either see both the parent span and the child ext_authz span, or none of them.
+
+Logging
+-------
+When :ref:`emit_filter_state_stats <envoy_v3_api_field_extensions.filters.http.ext_authz.v3.ExtAuthz.emit_filter_state_stats>` is set to true,
+ext_authz exposes fields ``latency_us``, ``bytesSent`` and ``bytesReceived`` for usage in CEL and logging.
+* ``filter_state["envoy.filters.http.ext_authz"].latency_us)``
+* ``%FILTER_STATE(envoy.filters.http.ext_authz:FIELD:latency_us)%``

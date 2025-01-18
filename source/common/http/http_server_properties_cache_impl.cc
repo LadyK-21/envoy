@@ -3,9 +3,10 @@
 #include <memory>
 
 #include "source/common/common/logger.h"
+#include "source/common/http/http3_status_tracker_impl.h"
+#include "source/common/runtime/runtime_features.h"
 
-#include "http3_status_tracker_impl.h"
-#include "quiche/spdy/core/spdy_alt_svc_wire_format.h"
+#include "quiche/http2/core/spdy_alt_svc_wire_format.h"
 #include "re2/re2.h"
 
 namespace Envoy {
@@ -116,9 +117,10 @@ HttpServerPropertiesCacheImpl::alternateProtocolsFromString(absl::string_view al
 }
 
 HttpServerPropertiesCacheImpl::HttpServerPropertiesCacheImpl(
-    Event::Dispatcher& dispatcher, std::unique_ptr<KeyValueStore>&& key_value_store,
-    size_t max_entries)
-    : dispatcher_(dispatcher), max_entries_(max_entries > 0 ? max_entries : 1024) {
+    Event::Dispatcher& dispatcher, std::vector<std::string>&& canonical_suffixes,
+    std::unique_ptr<KeyValueStore>&& key_value_store, size_t max_entries)
+    : dispatcher_(dispatcher), canonical_suffixes_(canonical_suffixes),
+      max_entries_(max_entries > 0 ? max_entries : 1024) {
   if (key_value_store) {
     KeyValueStore::ConstIterateCb load_protocols = [this](const std::string& key,
                                                           const std::string& value) {
@@ -155,7 +157,8 @@ void HttpServerPropertiesCacheImpl::setAlternatives(const Origin& origin,
   data.protocols = protocols;
   auto it = setPropertiesImpl(origin, data);
   if (key_value_store_) {
-    key_value_store_->addOrUpdate(originToString(origin), originDataToStringForCache(it->second));
+    key_value_store_->addOrUpdate(originToString(origin), originDataToStringForCache(it->second),
+                                  absl::nullopt);
   }
 }
 
@@ -164,7 +167,8 @@ void HttpServerPropertiesCacheImpl::setSrtt(const Origin& origin, std::chrono::m
   data.srtt = srtt;
   auto it = setPropertiesImpl(origin, data);
   if (key_value_store_) {
-    key_value_store_->addOrUpdate(originToString(origin), originDataToStringForCache(it->second));
+    key_value_store_->addOrUpdate(originToString(origin), originDataToStringForCache(it->second),
+                                  absl::nullopt);
   }
 }
 
@@ -182,7 +186,8 @@ void HttpServerPropertiesCacheImpl::setConcurrentStreams(const Origin& origin,
   data.concurrent_streams = concurrent_streams;
   auto it = setPropertiesImpl(origin, data);
   if (key_value_store_) {
-    key_value_store_->addOrUpdate(originToString(origin), originDataToStringForCache(it->second));
+    key_value_store_->addOrUpdate(originToString(origin), originDataToStringForCache(it->second),
+                                  absl::nullopt);
   }
 }
 
@@ -198,6 +203,7 @@ HttpServerPropertiesCacheImpl::ProtocolsMap::iterator
 HttpServerPropertiesCacheImpl::setPropertiesImpl(const Origin& origin,
                                                  OriginDataWithOptRef& origin_data) {
   if (origin_data.protocols.has_value()) {
+    maybeSetCanonicalOrigin(origin);
     std::vector<AlternateProtocol>& protocols = *origin_data.protocols;
     static const size_t max_protocols = 10;
     if (protocols.size() > max_protocols) {
@@ -229,7 +235,9 @@ HttpServerPropertiesCacheImpl::addOriginData(const Origin& origin, OriginData&& 
   ASSERT(protocols_.find(origin) == protocols_.end());
   while (protocols_.size() >= max_entries_) {
     auto iter = protocols_.begin();
-    key_value_store_->remove(originToString(iter->first));
+    if (key_value_store_) {
+      key_value_store_->remove(originToString(iter->first));
+    }
     protocols_.erase(iter);
   }
   protocols_[origin] = std::move(origin_data);
@@ -240,7 +248,13 @@ OptRef<const std::vector<HttpServerPropertiesCache::AlternateProtocol>>
 HttpServerPropertiesCacheImpl::findAlternatives(const Origin& origin) {
   auto entry_it = protocols_.find(origin);
   if (entry_it == protocols_.end() || !entry_it->second.protocols.has_value()) {
-    return makeOptRefFromPtr<const std::vector<AlternateProtocol>>(nullptr);
+    absl::optional<Origin> canonical = getCanonicalOrigin(origin.hostname_);
+    if (canonical.has_value()) {
+      entry_it = protocols_.find(*canonical);
+    }
+    if (entry_it == protocols_.end() || !entry_it->second.protocols.has_value()) {
+      return makeOptRefFromPtr<const std::vector<AlternateProtocol>>(nullptr);
+    }
   }
   std::vector<AlternateProtocol>& protocols = *entry_it->second.protocols;
 
@@ -260,7 +274,7 @@ HttpServerPropertiesCacheImpl::findAlternatives(const Origin& origin) {
   }
   if (key_value_store_ && original_size != protocols.size()) {
     key_value_store_->addOrUpdate(originToString(origin),
-                                  originDataToStringForCache(entry_it->second));
+                                  originDataToStringForCache(entry_it->second), absl::nullopt);
   }
   return makeOptRef(const_cast<const std::vector<AlternateProtocol>&>(protocols));
 }
@@ -281,6 +295,112 @@ HttpServerPropertiesCacheImpl::getOrCreateHttp3StatusTracker(const Origin& origi
   data.h3_status_tracker = std::make_unique<Http3StatusTrackerImpl>(dispatcher_);
   auto it = setPropertiesImpl(origin, data);
   return *it->second.h3_status_tracker;
+}
+
+void HttpServerPropertiesCacheImpl::markHttp3Broken(const Origin& origin) {
+  getOrCreateHttp3StatusTracker(origin).markHttp3Broken();
+  if (Runtime::runtimeFeatureEnabled(
+          "envoy.reloadable_features.use_canonical_suffix_for_quic_brokenness")) {
+    maybeSetCanonicalOriginForHttp3Brokenness(origin);
+  }
+}
+
+bool HttpServerPropertiesCacheImpl::isHttp3Broken(const Origin& origin) {
+  if (!Runtime::runtimeFeatureEnabled(
+          "envoy.reloadable_features.use_canonical_suffix_for_quic_brokenness")) {
+    return getOrCreateHttp3StatusTracker(origin).isHttp3Broken();
+  }
+
+  // Note that we don't create a new tracker for the origin.
+  if (auto entry_it = protocols_.find(origin);
+      entry_it != protocols_.end() && entry_it->second.h3_status_tracker != nullptr) {
+    return entry_it->second.h3_status_tracker->isHttp3Broken();
+  }
+
+  absl::optional<Origin> canonical = getCanonicalOriginForHttp3Brokenness(origin.hostname_);
+  if (!canonical.has_value()) {
+    return false;
+  }
+  if (auto entry_it = protocols_.find(*canonical); entry_it != protocols_.end()) {
+    if (entry_it->second.h3_status_tracker == nullptr) {
+      ENVOY_BUG(false, "the canonical origin doesn't have HTTP3 tracker");
+      return false;
+    }
+    return entry_it->second.h3_status_tracker->isHttp3Broken();
+  }
+
+  return false;
+}
+
+absl::optional<HttpServerPropertiesCacheImpl::Origin>
+HttpServerPropertiesCacheImpl::getCanonicalOriginForHttp3Brokenness(absl::string_view hostname) {
+  absl::string_view suffix = getCanonicalSuffix(hostname);
+  if (suffix.empty()) {
+    return {};
+  }
+
+  auto it = canonical_h3_brokenness_map_.find(suffix);
+  if (it == canonical_h3_brokenness_map_.end()) {
+    return {};
+  }
+  return it->second;
+}
+
+void HttpServerPropertiesCacheImpl::maybeSetCanonicalOriginForHttp3Brokenness(
+    const Origin& origin) {
+  absl::string_view suffix = getCanonicalSuffix(origin.hostname_);
+  if (suffix.empty()) {
+    return;
+  }
+  canonical_h3_brokenness_map_[suffix] = origin;
+}
+
+void HttpServerPropertiesCacheImpl::resetBrokenness() {
+  for (auto& protocol : protocols_) {
+    if (protocol.second.h3_status_tracker && protocol.second.h3_status_tracker->isHttp3Broken()) {
+      protocol.second.h3_status_tracker->markHttp3FailedRecently();
+    }
+  }
+}
+
+void HttpServerPropertiesCacheImpl::resetStatus() {
+  for (const std::pair<Origin, OriginData>& protocol : protocols_) {
+    if (protocol.second.h3_status_tracker) {
+      protocol.second.h3_status_tracker->markHttp3Pending();
+    }
+  }
+}
+
+absl::string_view HttpServerPropertiesCacheImpl::getCanonicalSuffix(absl::string_view hostname) {
+  for (const std::string& suffix : canonical_suffixes_) {
+    if (absl::EndsWith(hostname, suffix)) {
+      return suffix;
+    }
+  }
+  return "";
+}
+
+absl::optional<HttpServerPropertiesCache::Origin>
+HttpServerPropertiesCacheImpl::getCanonicalOrigin(absl::string_view hostname) {
+  absl::string_view suffix = getCanonicalSuffix(hostname);
+  if (suffix.empty()) {
+    return {};
+  }
+
+  auto it = canonical_alt_svc_map_.find(suffix);
+  if (it == canonical_alt_svc_map_.end()) {
+    return {};
+  }
+  return it->second;
+}
+
+void HttpServerPropertiesCacheImpl::maybeSetCanonicalOrigin(const Origin& origin) {
+  absl::string_view suffix = getCanonicalSuffix(origin.hostname_);
+  if (suffix.empty()) {
+    return;
+  }
+
+  canonical_alt_svc_map_[suffix] = origin;
 }
 
 } // namespace Http

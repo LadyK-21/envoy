@@ -1,6 +1,6 @@
 .. _api-v3_config_contrib:
 
-Contrib Extensions
+Contrib extensions
 ==================
 
 .. toctree::
@@ -8,5 +8,10 @@ Contrib Extensions
   :maxdepth: 2
 
   sip/sip
+  cluster_specifier/cluster_specifier
   cryptomb/cryptomb
-  hyperscan/hyperscan
+  hyperscan/matcher
+  hyperscan/regex_engine
+  dlb/dlb
+  qat/qat
+  tap_sinks/tap_sinks

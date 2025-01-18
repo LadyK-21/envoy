@@ -17,8 +17,8 @@ namespace DnsFilter {
 namespace {
 
 DEFINE_FUZZER(const uint8_t* buf, size_t len) {
-  static const auto local = Network::Utility::parseInternetAddressAndPort("127.0.2.1:5353");
-  static const auto peer = Network::Utility::parseInternetAddressAndPort("127.0.2.1:55088");
+  static const auto local = Network::Utility::parseInternetAddressAndPortNoThrow("127.0.2.1:5353");
+  static const auto peer = Network::Utility::parseInternetAddressAndPortNoThrow("127.0.2.1:55088");
 
   static NiceMock<Random::MockRandomGenerator> random;
   static NiceMock<Stats::MockHistogram> histogram;
@@ -27,8 +27,11 @@ DEFINE_FUZZER(const uint8_t* buf, size_t len) {
   static NiceMock<Stats::MockCounter> mock_query_buffer_underflow;
   static NiceMock<Stats::MockCounter> mock_record_name_overflow;
   static NiceMock<Stats::MockCounter> query_parsing_failure;
+  static NiceMock<Stats::MockCounter> queries_with_additional_rrs;
+  static NiceMock<Stats::MockCounter> queries_with_ans_or_authority_rrs;
   static DnsParserCounters counters(mock_query_buffer_underflow, mock_record_name_overflow,
-                                    query_parsing_failure);
+                                    query_parsing_failure, queries_with_additional_rrs,
+                                    queries_with_ans_or_authority_rrs);
 
   FuzzedDataProvider data_provider(buf, len);
   Buffer::InstancePtr query_buffer = std::make_unique<Buffer::OwnedImpl>();
